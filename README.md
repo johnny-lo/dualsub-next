@@ -86,3 +86,14 @@ cd extension && npm run build
 | GET    | `/v1/jobs?limit=N`   | recent jobs (most recent first)                |
 | GET    | `/v1/config`         | current daemon config                          |
 | PUT    | `/v1/config`         | persist config to TOML (restart to apply)      |
+
+## Acknowledgements
+
+The Udemy three-tier subtitle extraction strategy was inspired by
+[ChenYCL/chrome-extension-udemy-translate](https://github.com/ChenYCL/chrome-extension-udemy-translate)
+(MIT). This repo is a clean-room rewrite in Go + TypeScript with a different
+architecture (separate translation daemon); no source was copied directly.
+
+## License
+
+MIT — see [LICENSE](./LICENSE).
