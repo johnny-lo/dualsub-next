@@ -24,6 +24,63 @@ let liveTargetLang = '繁體中文'
 const inflightLive = new Set<string>()
 const daemon = new DaemonClient()
 
+// ─── persistent overlay cache ───────────────────────────────────────────
+// Translations are stored per videoKey in chrome.storage.local so that
+// page reloads and SPA lecture switches don't force the user to re-translate.
+const STORAGE_KEY = 'dualsubTranslationCache'
+
+interface StoredEntry {
+  translations: Record<string, string>
+  updatedAt: number
+}
+type StoredCache = Record<string, StoredEntry>
+
+// Serialize storage writes — multiple PATCH_OVERLAY messages can race a
+// read-modify-write cycle and clobber each other otherwise.
+let writeChain: Promise<void> = Promise.resolve()
+
+function readStoredTranslations(videoKey: string): Promise<Record<string, string> | null> {
+  return new Promise((resolve) => {
+    chrome.storage.local.get([STORAGE_KEY], (data) => {
+      const cache = (data[STORAGE_KEY] ?? {}) as StoredCache
+      const entry = cache[videoKey]
+      resolve(entry && Object.keys(entry.translations).length > 0 ? entry.translations : null)
+    })
+  })
+}
+
+function writeStoredTranslations(
+  videoKey: string,
+  translations: Record<string, string>,
+  mode: 'replace' | 'merge',
+): Promise<void> {
+  const op = () =>
+    new Promise<void>((resolve) => {
+      chrome.storage.local.get([STORAGE_KEY], (data) => {
+        const cache = (data[STORAGE_KEY] ?? {}) as StoredCache
+        const existing = cache[videoKey]?.translations ?? {}
+        const merged = mode === 'replace' ? translations : { ...existing, ...translations }
+        cache[videoKey] = { translations: merged, updatedAt: Date.now() }
+        chrome.storage.local.set({ [STORAGE_KEY]: cache }, () => resolve())
+      })
+    })
+  writeChain = writeChain.then(op, op)
+  return writeChain
+}
+
+async function restoreOverlayFromStorage(): Promise<void> {
+  if (!extractor) return
+  const videoKey = extractor.videoKey()
+  const stored = await readStoredTranslations(videoKey)
+  if (!stored) return
+  console.log(
+    `[DualSub] restoring ${Object.keys(stored).length} cached translations for ${videoKey}`,
+  )
+  currentVideoKey = videoKey
+  ensureOverlay().setTranslations(stored)
+  startCueObserver()
+}
+
 function ensureOverlay(): SubtitleOverlay {
   if (!overlay) overlay = new SubtitleOverlay()
   return overlay
@@ -129,6 +186,7 @@ chrome.runtime.onMessage.addListener(
       currentVideoKey = msg.videoKey
       ensureOverlay().setTranslations(msg.translations)
       startCueObserver()
+      void writeStoredTranslations(msg.videoKey, msg.translations, 'replace')
       sendResponse({ ok: true } satisfies SimpleAck)
       return false
     }
@@ -139,6 +197,7 @@ chrome.runtime.onMessage.addListener(
         return false
       }
       overlay.patchTranslations(msg.translations)
+      void writeStoredTranslations(msg.videoKey, msg.translations, 'merge')
       sendResponse({ ok: true } satisfies SimpleAck)
       return false
     }
@@ -179,3 +238,39 @@ chrome.runtime.onMessage.addListener(
     return false
   },
 )
+
+// On load: if this video already has translations cached from a prior
+// session, mount the overlay immediately so playback shows Chinese without
+// the user having to click Translate again.
+void restoreOverlayFromStorage()
+
+// Udemy switches between lectures via SPA navigation — the URL changes via
+// pushState without a page reload, the <video> element is replaced, and the
+// overlay/translations from the previous lecture become stale. Detect the
+// change, tear down the old overlay, and try to restore from storage for the
+// new videoKey.
+if (extractor?.site === 'udemy') {
+  let lastPathname = location.pathname
+  const handleNavigation = () => {
+    if (location.pathname === lastPathname) return
+    lastPathname = location.pathname
+    console.log('[DualSub] Udemy SPA navigation, refreshing overlay')
+    stopAll()
+    // Wait a tick for Udemy to mount the new lecture's DOM before we
+    // try to query videoKey / well--text.
+    setTimeout(() => {
+      void restoreOverlayFromStorage()
+    }, 500)
+  }
+  const origPushState = history.pushState.bind(history)
+  history.pushState = (...args: Parameters<typeof history.pushState>) => {
+    origPushState(...args)
+    handleNavigation()
+  }
+  const origReplaceState = history.replaceState.bind(history)
+  history.replaceState = (...args: Parameters<typeof history.replaceState>) => {
+    origReplaceState(...args)
+    handleNavigation()
+  }
+  window.addEventListener('popstate', handleNavigation)
+}

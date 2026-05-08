@@ -108,9 +108,32 @@ export class SubtitleOverlay {
     }
   }
 
-  /** Returns true if the original text already has a known translation. */
+  /** Returns true if lookupTranslation would resolve a non-empty value. */
   hasTranslation(originalText: string): boolean {
-    return this.translations.has(normalizeText(originalText))
+    return this.lookupTranslation(originalText) !== null
+  }
+
+  /**
+   * Resolve the rendered text → cached translation. Tries an exact normalized
+   * match first; on miss, falls back to substring containment to bridge the
+   * gap when the cache was built from a different caption track than the one
+   * the player is rendering (e.g. Udemy [CC] vs [自動]: similar wording, but
+   * different cue boundaries make exact keys diverge).
+   */
+  private lookupTranslation(originalText: string): string | null {
+    const normalized = normalizeText(originalText)
+    const exact = this.translations.get(normalized)
+    if (exact) return exact
+
+    if (normalized.length < 10) return null
+    for (const [key, value] of this.translations) {
+      if (key.length < 10) continue
+      const shorter = Math.min(normalized.length, key.length)
+      const longer = Math.max(normalized.length, key.length)
+      if (shorter / longer < 0.6) continue
+      if (normalized.includes(key) || key.includes(normalized)) return value
+    }
+    return null
   }
 
   render(originalTexts: string[] | null): void {
@@ -128,7 +151,7 @@ export class SubtitleOverlay {
       orig.textContent = text
       const trans = document.createElement('div')
       trans.className = 'translated'
-      trans.textContent = this.translations.get(normalizeText(text)) ?? ''
+      trans.textContent = this.lookupTranslation(text) ?? ''
       line.appendChild(orig)
       line.appendChild(trans)
       this.linesEl.appendChild(line)

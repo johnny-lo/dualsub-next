@@ -5,13 +5,15 @@ import { ExtractError, type ActiveCue, type CueObserver, type SubtitleExtractor 
 
 // Udemy renders the active caption text into a DOM element they own
 // (`well--text--<hash>`) instead of relying on the browser's TextTrack API,
-// at least for [CC] tracks. Polling its textContent is the only reliable
-// way to know what the player is showing in real time.
+// at least for [CC] tracks. We combine a MutationObserver (sub-frame
+// reactivity when Udemy swaps the cue text) with a 300ms interval (catches
+// cases where the observer doesn't fire — e.g. textContent changes inside
+// nodes that are themselves replaced before MO sees them).
+const UDEMY_CUE_SELECTOR = '[class*="well--text"]'
+
 function observeUdemyCaptions(observer: CueObserver): () => void {
   let lastText = ''
-  const tick = () => {
-    const el = document.querySelector<HTMLElement>('[class*="well--text"]')
-    const text = el?.textContent?.trim() ?? ''
+  const emit = (text: string) => {
     if (text === lastText) return
     lastText = text
     if (text === '') {
@@ -20,9 +22,18 @@ function observeUdemyCaptions(observer: CueObserver): () => void {
       observer({ texts: [text], startTime: 0, endTime: 0 } satisfies ActiveCue)
     }
   }
-  const interval = window.setInterval(tick, 250)
+  const tick = () => {
+    const el = document.querySelector<HTMLElement>(UDEMY_CUE_SELECTOR)
+    emit(el?.textContent?.trim() ?? '')
+  }
+  const interval = window.setInterval(tick, 300)
+  const mo = new MutationObserver(tick)
+  mo.observe(document.body, { childList: true, subtree: true, characterData: true })
   tick()
-  return () => window.clearInterval(interval)
+  return () => {
+    window.clearInterval(interval)
+    mo.disconnect()
+  }
 }
 
 const UDEMY_HEADERS: Record<string, string> = {
