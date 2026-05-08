@@ -20,29 +20,43 @@ export async function waitForCues(
   if (ready) return ready
 
   return new Promise<TextTrack>((resolve, reject) => {
-    const timer = setTimeout(() => {
-      reject(new ExtractError('TEXTTRACK_TIMEOUT', 'TextTrack cues did not load in time'))
-    }, timeoutMs)
+    const subscribed: TextTrack[] = []
+    let cleanup = () => {} // assigned below; declared up-front so handlers can call it
 
     const tryResolve = () => {
       const track = pickReady()
       if (track) {
-        clearTimeout(timer)
+        cleanup()
         resolve(track)
       }
+    }
+
+    const onAddTrack = (e: TrackEvent) => {
+      const newTrack = e.track as TextTrack
+      if (newTrack.mode === 'disabled') newTrack.mode = 'hidden'
+      newTrack.addEventListener('cuechange', tryResolve)
+      subscribed.push(newTrack)
+      tryResolve()
+    }
+
+    const timer = setTimeout(() => {
+      cleanup()
+      reject(new ExtractError('TEXTTRACK_TIMEOUT', 'TextTrack cues did not load in time'))
+    }, timeoutMs)
+
+    cleanup = () => {
+      clearTimeout(timer)
+      for (const t of subscribed) t.removeEventListener('cuechange', tryResolve)
+      textTracks.removeEventListener('addtrack', onAddTrack)
     }
 
     for (const track of Array.from(textTracks)) {
       if (track.mode === 'disabled') track.mode = 'hidden'
       track.addEventListener('cuechange', tryResolve)
+      subscribed.push(track)
     }
 
-    textTracks.addEventListener('addtrack', (e: TrackEvent) => {
-      const newTrack = e.track as TextTrack
-      if (newTrack.mode === 'disabled') newTrack.mode = 'hidden'
-      newTrack.addEventListener('cuechange', tryResolve)
-      tryResolve()
-    })
+    textTracks.addEventListener('addtrack', onAddTrack)
   })
 }
 

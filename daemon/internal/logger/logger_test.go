@@ -23,6 +23,9 @@ func TestEventAppendsJSONLine(t *testing.T) {
 	lg.Event("translate_done", map[string]any{
 		"video_key": "vid-A", "completed": 1,
 	})
+	if err := lg.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
 
 	f, err := os.Open(path)
 	if err != nil {

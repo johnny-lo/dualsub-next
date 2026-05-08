@@ -16,6 +16,7 @@ import (
 type Logger struct {
 	mu sync.Mutex
 	w  io.Writer
+	f  *os.File // nil when writing only to stderr
 }
 
 // New opens (or creates) the log file in append mode. If path is empty, the
@@ -31,7 +32,21 @@ func New(path string) (*Logger, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Logger{w: io.MultiWriter(os.Stderr, f)}, nil
+	return &Logger{w: io.MultiWriter(os.Stderr, f), f: f}, nil
+}
+
+// Close releases the underlying log file (if any). Safe to call when the
+// logger writes only to stderr (no-op).
+func (l *Logger) Close() error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.f == nil {
+		return nil
+	}
+	err := l.f.Close()
+	l.f = nil
+	l.w = os.Stderr
+	return err
 }
 
 // Event writes one JSON-encoded record. fields is merged with default keys.

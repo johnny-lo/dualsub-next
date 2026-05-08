@@ -104,6 +104,7 @@ Or run: dualsub config init`, *cfgPath)
 	if err != nil {
 		return fmt.Errorf("open log: %w", err)
 	}
+	defer lg.Close()
 
 	providers := buildProviders(cfg)
 	orch := translate.New(providers, c, translate.Config{

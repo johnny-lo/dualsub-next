@@ -9,11 +9,27 @@ export class SubtitleOverlay {
   private host: HTMLDivElement
   private root: ShadowRoot
   private container: HTMLDivElement
-  private originalEl: HTMLDivElement
-  private translatedEl: HTMLDivElement
+  private linesEl: HTMLDivElement
   private translations = new Map<string, string>()
   private dragging = false
   private dragOffset = { x: 0, y: 0 }
+
+  private onMouseDown = (e: MouseEvent) => {
+    this.dragging = true
+    const rect = this.container.getBoundingClientRect()
+    this.dragOffset = { x: e.clientX - rect.left, y: e.clientY - rect.top }
+    e.preventDefault()
+  }
+  private onMouseMove = (e: MouseEvent) => {
+    if (!this.dragging) return
+    this.container.style.left = `${e.clientX - this.dragOffset.x}px`
+    this.container.style.top = `${e.clientY - this.dragOffset.y}px`
+    this.container.style.bottom = 'auto'
+    this.container.style.transform = 'none'
+  }
+  private onMouseUp = () => {
+    this.dragging = false
+  }
 
   constructor() {
     this.host = document.createElement('div')
@@ -43,6 +59,7 @@ export class SubtitleOverlay {
         box-shadow: 0 2px 12px rgba(0,0,0,0.4);
       }
       .container.empty { display: none; }
+      .line + .line { margin-top: 6px; }
       .original {
         font-size: 18px;
         color: #fff;
@@ -59,12 +76,9 @@ export class SubtitleOverlay {
 
     this.container = document.createElement('div')
     this.container.className = 'container empty'
-    this.originalEl = document.createElement('div')
-    this.originalEl.className = 'original'
-    this.translatedEl = document.createElement('div')
-    this.translatedEl.className = 'translated'
-    this.container.appendChild(this.originalEl)
-    this.container.appendChild(this.translatedEl)
+    this.linesEl = document.createElement('div')
+    this.linesEl.className = 'lines'
+    this.container.appendChild(this.linesEl)
     this.root.appendChild(this.container)
 
     this.attachDragHandlers()
@@ -72,22 +86,9 @@ export class SubtitleOverlay {
   }
 
   private attachDragHandlers() {
-    this.container.addEventListener('mousedown', (e) => {
-      this.dragging = true
-      const rect = this.container.getBoundingClientRect()
-      this.dragOffset = { x: e.clientX - rect.left, y: e.clientY - rect.top }
-      e.preventDefault()
-    })
-    window.addEventListener('mousemove', (e) => {
-      if (!this.dragging) return
-      this.container.style.left = `${e.clientX - this.dragOffset.x}px`
-      this.container.style.top = `${e.clientY - this.dragOffset.y}px`
-      this.container.style.bottom = 'auto'
-      this.container.style.transform = 'none'
-    })
-    window.addEventListener('mouseup', () => {
-      this.dragging = false
-    })
+    this.container.addEventListener('mousedown', this.onMouseDown)
+    window.addEventListener('mousemove', this.onMouseMove)
+    window.addEventListener('mouseup', this.onMouseUp)
   }
 
   setTranslations(map: Record<string, string>): void {
@@ -112,20 +113,32 @@ export class SubtitleOverlay {
     return this.translations.has(normalizeText(originalText))
   }
 
-  render(originalText: string | null): void {
-    if (!originalText) {
+  render(originalTexts: string[] | null): void {
+    this.linesEl.replaceChildren()
+    if (!originalTexts || originalTexts.length === 0) {
       this.container.classList.add('empty')
-      this.originalEl.textContent = ''
-      this.translatedEl.textContent = ''
       return
     }
-    const translated = this.translations.get(normalizeText(originalText))
     this.container.classList.remove('empty')
-    this.originalEl.textContent = originalText
-    this.translatedEl.textContent = translated ?? ''
+    for (const text of originalTexts) {
+      const line = document.createElement('div')
+      line.className = 'line'
+      const orig = document.createElement('div')
+      orig.className = 'original'
+      orig.textContent = text
+      const trans = document.createElement('div')
+      trans.className = 'translated'
+      trans.textContent = this.translations.get(normalizeText(text)) ?? ''
+      line.appendChild(orig)
+      line.appendChild(trans)
+      this.linesEl.appendChild(line)
+    }
   }
 
   destroy(): void {
+    this.container.removeEventListener('mousedown', this.onMouseDown)
+    window.removeEventListener('mousemove', this.onMouseMove)
+    window.removeEventListener('mouseup', this.onMouseUp)
     this.host.remove()
     this.translations.clear()
   }

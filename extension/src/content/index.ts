@@ -30,7 +30,10 @@ function ensureOverlay(): SubtitleOverlay {
 }
 
 function startCueObserver() {
-  if (cueDisposer || !extractor) return
+  if (!extractor) return
+  // Always re-attach. The video element gets swapped during Udemy SPA
+  // lecture-to-lecture navigation, so a previous disposer would be stale.
+  cueDisposer?.()
   cueDisposer = extractor.observeCurrentCue(handleCue)
 }
 
@@ -50,11 +53,14 @@ function handleCue(cue: ActiveCue | null) {
     overlay.render(null)
     return
   }
-  overlay.render(cue.text)
-  if (liveMode && liveProvider && extractor && !overlay.hasTranslation(cue.text)) {
-    const text = cue.text
-    if (inflightLive.has(text)) return
+  overlay.render(cue.texts)
+  if (!liveMode || !liveProvider || !extractor) return
+  for (const text of cue.texts) {
+    if (overlay.hasTranslation(text)) continue
+    if (inflightLive.has(text)) continue
     inflightLive.add(text)
+    const captured = text
+    const currentTexts = cue.texts
     daemon.translate(
       {
         site: extractor.site,
@@ -63,18 +69,18 @@ function handleCue(cue: ActiveCue | null) {
         provider: liveProvider,
         source_lang: 'auto',
         target_lang: liveTargetLang,
-        lines: [{ index: 1, text }],
+        lines: [{ index: 1, text: captured }],
       },
       {
         onChunkDone: (ck) => {
           if (ck.lines.length > 0 && overlay) {
-            overlay.patchTranslations({ [text]: ck.lines[0].text })
-            // re-render if still active
-            overlay.render(text)
+            overlay.patchTranslations({ [captured]: ck.lines[0].text })
+            // re-render the same set of cues so the new translation shows up
+            overlay.render(currentTexts)
           }
         },
-        onDone: () => inflightLive.delete(text),
-        onFatal: () => inflightLive.delete(text),
+        onDone: () => inflightLive.delete(captured),
+        onFatal: () => inflightLive.delete(captured),
       },
     )
   }

@@ -1,8 +1,29 @@
 import type { TranscriptEntry } from '@/shared/transcript'
-import { observeViaTextTracks } from './cueObserver'
 import { parseVtt } from './parseVtt'
 import { cuesToEntries, waitForCues } from './textTrack'
-import { ExtractError, type CueObserver, type SubtitleExtractor } from './types'
+import { ExtractError, type ActiveCue, type CueObserver, type SubtitleExtractor } from './types'
+
+// Udemy renders the active caption text into a DOM element they own
+// (`well--text--<hash>`) instead of relying on the browser's TextTrack API,
+// at least for [CC] tracks. Polling its textContent is the only reliable
+// way to know what the player is showing in real time.
+function observeUdemyCaptions(observer: CueObserver): () => void {
+  let lastText = ''
+  const tick = () => {
+    const el = document.querySelector<HTMLElement>('[class*="well--text"]')
+    const text = el?.textContent?.trim() ?? ''
+    if (text === lastText) return
+    lastText = text
+    if (text === '') {
+      observer(null)
+    } else {
+      observer({ texts: [text], startTime: 0, endTime: 0 } satisfies ActiveCue)
+    }
+  }
+  const interval = window.setInterval(tick, 250)
+  tick()
+  return () => window.clearInterval(interval)
+}
 
 const UDEMY_HEADERS: Record<string, string> = {
   'X-Requested-With': 'XMLHttpRequest',
@@ -139,25 +160,26 @@ export class UdemyExtractor implements SubtitleExtractor {
   }
 
   async extractFullTranscript(preferredLang = 'en'): Promise<TranscriptEntry[]> {
+    // Udemy renders captions in DOM (well--text), not in the browser's TextTracks
+    // for [CC] tracks. Prefer Tier 1 REST API which fetches the same VTT the
+    // player is using; observation is via DOM polling (see observeCurrentCue).
     const parsed = parseUrl()
     if (!parsed) {
       throw new ExtractError('NOT_LECTURE_PAGE', 'Not on a Udemy lecture page')
     }
-
     try {
       const entries = await tier1Api(parsed, preferredLang)
-      console.log(`[DualSub] Udemy Tier 1 (REST API) → ${entries.length} cues`)
+      console.log(`[DualSub] Udemy REST API → ${entries.length} cues`)
       return entries
     } catch (err) {
-      console.warn('[DualSub] Udemy Tier 1 failed, falling back to TextTrack:', err)
+      console.warn('[DualSub] Udemy REST API failed, falling back to TextTrack:', err)
     }
-
     const entries = await tier2TextTrack(preferredLang)
-    console.log(`[DualSub] Udemy Tier 2 (TextTrack) → ${entries.length} cues`)
+    console.log(`[DualSub] Udemy TextTrack fallback → ${entries.length} cues`)
     return entries
   }
 
   observeCurrentCue(observer: CueObserver): () => void {
-    return observeViaTextTracks(observer)
+    return observeUdemyCaptions(observer)
   }
 }

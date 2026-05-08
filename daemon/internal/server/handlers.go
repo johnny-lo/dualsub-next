@@ -41,6 +41,14 @@ func (s *Server) handleProviders(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, out)
 }
 
+// Body size limits — localhost-only, but cap to avoid trivial OOM from a
+// runaway request. A full transcript is typically a few hundred KB; 10 MB is
+// generous. Config payloads are tiny.
+const (
+	maxTranslateBody = 10 << 20 // 10 MB
+	maxConfigBody    = 1 << 20  // 1 MB
+)
+
 // ─── /v1/translate (SSE) ────────────────────────────────────────────────────
 
 type translateRequest struct {
@@ -59,6 +67,7 @@ func (s *Server) handleTranslate(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "POST only", http.StatusMethodNotAllowed)
 		return
 	}
+	r.Body = http.MaxBytesReader(w, r.Body, maxTranslateBody)
 	var req translateRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "invalid json: "+err.Error(), http.StatusBadRequest)
@@ -106,7 +115,13 @@ func (s *Server) handleTranslate(w http.ResponseWriter, r *http.Request) {
 	}
 	for ev := range events {
 		if err := writeSSE(w, string(ev.Type), ev.Payload); err != nil {
-			return // client disconnect; orchestrator will see ctx cancel
+			// Client disconnected. r.Context() will be cancelled, so the
+			// orchestrator winds down — but in-flight workers may still send
+			// to the buffered channel before they notice. Drain to keep them
+			// from blocking and leaking the goroutine.
+			for range events {
+			}
+			return
 		}
 		flusher.Flush()
 	}
@@ -169,6 +184,7 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "config path not configured", http.StatusInternalServerError)
 			return
 		}
+		r.Body = http.MaxBytesReader(w, r.Body, maxConfigBody)
 		var newCfg config.Config
 		if err := json.NewDecoder(r.Body).Decode(&newCfg); err != nil {
 			http.Error(w, "invalid json: "+err.Error(), http.StatusBadRequest)

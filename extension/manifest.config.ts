@@ -25,7 +25,7 @@ export default defineManifest({
       run_at: 'document_idle',
     },
   ],
-  permissions: ['storage', 'activeTab', 'clipboardWrite'],
+  permissions: ['storage', 'activeTab', 'clipboardWrite', 'alarms'],
   host_permissions: [
     'https://www.netflix.com/*',
     'https://www.udemy.com/*',

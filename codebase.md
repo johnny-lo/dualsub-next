@@ -84,11 +84,12 @@ Live mode skips the popup: content script directly calls
 | `src/content/index.ts` | Message router. Receives: `EXTRACT_TRANSCRIPT`, `SET_OVERLAY`, `PATCH_OVERLAY`, `CLEAR_OVERLAY`, `SET_LIVE_MODE`, `PING_OVERLAY`. Holds module-scoped state for overlay + Live mode (intentionally not chrome.storage — re-translate after page reload). |
 | `src/content/extractors/types.ts` | `SubtitleExtractor` interface, `SiteId` union, `ExtractError`. |
 | `src/content/extractors/index.ts` | `detectSite()` factory — single registration point for new sites. |
-| `src/content/extractors/{Netflix,Udemy}Extractor.ts` | Per-site extractors. Both implement `extractFullTranscript()` and `observeCurrentCue()`. |
-| `src/content/extractors/cueObserver.ts` | Shared TextTrack subscription used by both extractors for Live mode. |
+| `src/content/extractors/NetflixExtractor.ts` | Netflix extractor. `video.textTracks` for both extraction and observation. |
+| `src/content/extractors/UdemyExtractor.ts` | Udemy extractor. **Tier 1 REST API for extraction** (Tier 2 textTrack as fallback only). **`observeUdemyCaptions` polls `[class*="well--text"]` every 250ms for live observation** — Udemy's [CC] track does not populate `video.textTracks`. |
+| `src/content/extractors/cueObserver.ts` | TextTrack-based cue subscription. Used by Netflix; **NOT used by Udemy** (Udemy uses DOM polling — see §7). Emits `ActiveCue { texts: string[], ... }` so multiple simultaneous cues stay distinct (cache keys are per-cue). |
 | `src/content/extractors/textTrack.ts` | Helper: `waitForCues` + `cuesToEntries` for full-transcript bulk extraction. |
 | `src/content/extractors/parseVtt.ts` | VTT parser used by Udemy Tier 1. |
-| `src/content/overlay/SubtitleOverlay.ts` | Shadow-DOM bilingual overlay. Drag-to-reposition. `setTranslations()` replaces, `patchTranslations()` merges. Lookup uses `normalizeText()`. |
+| `src/content/overlay/SubtitleOverlay.ts` | Shadow-DOM bilingual overlay. Drag-to-reposition. `setTranslations()` replaces, `patchTranslations()` merges. `render(texts: string[] \| null)` builds one `(original, translated)` pair per active cue; lookup uses `normalizeText()`. |
 | `src/popup/App.tsx` | Main UI. Daemon status, provider dropdown, Translate flow with per-chunk overlay updates, Live mode switch, recent jobs, Extract & Copy fallback. |
 | `src/options/App.tsx` | Antd Form covering server / translate / cache / 3 providers. Saves via `client.putConfig()`; UI tells user to restart daemon. |
 | `src/shared/DaemonClient.ts` | One class wrapping daemon HTTP + SSE. `translate(req, handlers)` returns an abort fn. |
@@ -275,6 +276,16 @@ There is no migration story. Either:
 - **Module-scoped state in content script**: overlay + Live mode state
   doesn't survive page reload (intentional — re-translate is fine for
   self-use; chrome.storage adds churn). Don't "fix" this.
+- **Udemy [CC] is not in `video.textTracks`**. The Udemy player renders
+  [CC] caption text into a DOM element matching `[class*="well--text"]` and
+  never populates the HTML5 TextTrack API for it. `UdemyExtractor` therefore
+  uses `observeUdemyCaptions` (250 ms DOM poll) for live observation, and
+  `extractFullTranscript` prefers Tier 1 REST API. Tier 2 / `observeViaTextTracks`
+  works on Netflix only. [自動] tracks may sometimes populate textTracks, but
+  routing everything through DOM keeps extraction and observation aligned.
+- **Udemy SPA lecture switching swaps the `<video>` element**. `startCueObserver`
+  in `content/index.ts` re-attaches every time it is called — do not re-add a
+  "skip if disposer exists" guard.
 
 ## 8. Things deliberately NOT done — do not "fix"
 
@@ -359,5 +370,7 @@ If you change … then check …
   every input index. Retryable; the orchestrator will attempt again with
   exponential backoff.
 - **Tier 1 / Tier 2** (Udemy) — Tier 1 = Udemy REST API → VTT URL → fetch
-  → parse. Tier 2 = HTML5 TextTrack fallback. Tier 1 is preferred when it
-  works (faster, full transcript, doesn't need subtitles toggled on).
+  → parse. Tier 2 = HTML5 TextTrack fallback. **Tier 1 is the primary path**
+  (TextTrack is unreliable on Udemy — see §7). Live observation goes through
+  DOM polling (`observeUdemyCaptions`) on `[class*="well--text"]` regardless
+  of which extraction tier succeeded.

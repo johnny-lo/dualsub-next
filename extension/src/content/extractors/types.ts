@@ -5,7 +5,12 @@ export type SiteId = 'netflix' | 'udemy'
 export type CueObserver = (cue: ActiveCue | null) => void
 
 export interface ActiveCue {
-  text: string
+  /**
+   * Text of each VTT cue currently active on the player. The list preserves
+   * cue boundaries — do NOT join these into one string for cache lookup,
+   * because the original transcript was indexed per-cue.
+   */
+  texts: string[]
   startTime: number
   endTime: number
 }

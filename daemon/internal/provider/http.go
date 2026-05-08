@@ -8,9 +8,19 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strings"
 	"time"
 )
+
+// apiKeyParamRE matches credentials carried in URL query strings (Gemini puts
+// the API key in `?key=...`). We scrub them out of any error message that
+// might surface to the extension or logs.
+var apiKeyParamRE = regexp.MustCompile(`(?i)([?&](?:api_?key|key|access_token)=)[^&\s'"]+`)
+
+func sanitizeMessage(s string) string {
+	return apiKeyParamRE.ReplaceAllString(s, "${1}REDACTED")
+}
 
 type httpClient struct {
 	client *http.Client
@@ -54,18 +64,19 @@ func (h *httpClient) postJSON(ctx context.Context, urlStr string, headers map[st
 }
 
 func mapNetErr(name string, err error) error {
+	msg := sanitizeMessage(err.Error())
 	if errors.Is(err, context.DeadlineExceeded) {
-		return &Error{Code: CodeTimeout, Provider: name, Message: err.Error(), Retryable: true, Cause: err}
+		return &Error{Code: CodeTimeout, Provider: name, Message: msg, Retryable: true, Cause: err}
 	}
 	var urlErr *url.Error
 	if errors.As(err, &urlErr) && urlErr.Timeout() {
-		return &Error{Code: CodeTimeout, Provider: name, Message: err.Error(), Retryable: true, Cause: err}
+		return &Error{Code: CodeTimeout, Provider: name, Message: msg, Retryable: true, Cause: err}
 	}
-	return &Error{Code: CodeNetwork, Provider: name, Message: err.Error(), Retryable: true, Cause: err}
+	return &Error{Code: CodeNetwork, Provider: name, Message: msg, Retryable: true, Cause: err}
 }
 
 func mapStatus(name string, status int, body []byte) error {
-	msg := truncate(string(body), 500)
+	msg := sanitizeMessage(truncate(string(body), 500))
 	switch {
 	case status == 401 || status == 403:
 		return &Error{Code: CodeInvalidKey, Provider: name, Message: msg, Retryable: false}

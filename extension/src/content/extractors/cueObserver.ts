@@ -14,34 +14,36 @@ export function observeViaTextTracks(observer: CueObserver): () => void {
     return () => {}
   }
 
-  let lastText = ''
+  let lastTexts: string[] = []
+  const sameAsLast = (next: string[]) =>
+    next.length === lastTexts.length && next.every((t, i) => t === lastTexts[i])
 
   const handleCueChange = (track: TextTrack) => () => {
     const cues = track.activeCues
     if (!cues || cues.length === 0) {
-      if (lastText !== '') {
-        lastText = ''
+      if (lastTexts.length > 0) {
+        lastTexts = []
         observer(null)
       }
       return
     }
-    // Concatenate multi-line cues with a single space.
-    const parts: string[] = []
+    // Keep each active cue separate — translation cache is keyed per cue.
+    const texts: string[] = []
     let earliestStart = Infinity
     let latestEnd = 0
     for (const cue of Array.from(cues)) {
       const c = cue as VTTCue
-      parts.push(c.text.replace(/<[^>]+>/g, '').trim())
+      const t = c.text.replace(/<[^>]+>/g, '').trim()
+      if (t) texts.push(t)
       earliestStart = Math.min(earliestStart, c.startTime)
       latestEnd = Math.max(latestEnd, c.endTime)
     }
-    const text = parts.join(' ').trim()
-    if (text === lastText) return
-    lastText = text
-    if (text === '') {
+    if (sameAsLast(texts)) return
+    lastTexts = texts
+    if (texts.length === 0) {
       observer(null)
     } else {
-      observer({ text, startTime: earliestStart, endTime: latestEnd } satisfies ActiveCue)
+      observer({ texts, startTime: earliestStart, endTime: latestEnd } satisfies ActiveCue)
     }
   }
 

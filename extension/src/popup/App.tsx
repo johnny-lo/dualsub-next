@@ -5,6 +5,7 @@ import {
   Collapse,
   ConfigProvider,
   Divider,
+  Input,
   Progress,
   Select,
   Space,
@@ -15,6 +16,7 @@ import {
 import {
   CopyOutlined,
   ReloadOutlined,
+  SettingOutlined,
   StopOutlined,
   TranslationOutlined,
 } from '@ant-design/icons'
@@ -64,6 +66,20 @@ type TranslateJob = {
 
 const client = new DaemonClient()
 
+// Path to the dualsub-next repo on this machine. Edit if you move the repo.
+const DAEMON_DIR_WINDOWS = 'c:\\Users\\j4503\\repos\\dualsub-next'
+
+function detectStartCommand(): string {
+  const ua = navigator.userAgent
+  const uaPlatform = (navigator as { userAgentData?: { platform?: string } }).userAgentData?.platform ?? ''
+  const isWindows = /windows/i.test(uaPlatform) || /windows/i.test(ua)
+  if (isWindows) {
+    return `cd '${DAEMON_DIR_WINDOWS}'; .\\dualsub-watch.ps1`
+  }
+  // Linux/macOS — path unknown to extension; user runs from their repo root.
+  return './dualsub-watch.sh'
+}
+
 // Build a Record<original_text, translated_text> from a chunk payload.
 function makeChunkMap(
   source: TranscriptPayload,
@@ -90,6 +106,18 @@ export default function App() {
   const [job, setJob] = useState<TranslateJob | null>(null)
   const [recentJobs, setRecentJobs] = useState<JobSummary[]>([])
   const abortRef = useRef<(() => void) | null>(null)
+
+  const startCommand = useMemo(() => detectStartCommand(), [])
+  const [copiedStart, setCopiedStart] = useState(false)
+  const onCopyStartCommand = async () => {
+    try {
+      await navigator.clipboard.writeText(startCommand)
+      setCopiedStart(true)
+      setTimeout(() => setCopiedStart(false), 1500)
+    } catch (err) {
+      console.error('[DualSub] clipboard write failed:', err)
+    }
+  }
 
   const refreshDaemon = async () => {
     setDaemon({ state: 'checking' })
@@ -286,22 +314,58 @@ export default function App() {
 
         {/* Daemon status */}
         <Space direction="vertical" size="small" style={{ width: '100%' }}>
-          <Space>
-            <span>Daemon:</span>
-            {daemon.state === 'checking' && <Tag color="blue">checking…</Tag>}
-            {daemon.state === 'connected' && <Tag color="green">connected</Tag>}
-            {daemon.state === 'offline' && <Tag color="red">offline</Tag>}
+          <Space style={{ width: '100%', justifyContent: 'space-between' }}>
+            <Space>
+              <span>Daemon:</span>
+              {daemon.state === 'checking' && <Tag color="blue">checking…</Tag>}
+              {daemon.state === 'connected' && <Tag color="green">connected</Tag>}
+              {daemon.state === 'offline' && <Tag color="red">offline</Tag>}
+              <Button
+                icon={<ReloadOutlined />}
+                onClick={refreshDaemon}
+                size="small"
+                type="text"
+                title="Refresh"
+              />
+            </Space>
             <Button
-              icon={<ReloadOutlined />}
-              onClick={refreshDaemon}
+              icon={<SettingOutlined />}
+              onClick={() => chrome.runtime.openOptionsPage()}
               size="small"
               type="text"
-            />
+              title="Open settings"
+            >
+              Settings
+            </Button>
           </Space>
           {daemon.state === 'offline' && (
-            <Typography.Text type="danger" style={{ fontSize: 12 }}>
-              {daemon.error} — run <code>./dualsub serve</code>
-            </Typography.Text>
+            <Space direction="vertical" size={4} style={{ width: '100%' }}>
+              <Typography.Text type="danger" style={{ fontSize: 12 }}>
+                {daemon.error}
+              </Typography.Text>
+              <Typography.Text type="secondary" style={{ fontSize: 11 }}>
+                Run this in a terminal to start the daemon:
+              </Typography.Text>
+              <Space.Compact style={{ width: '100%' }}>
+                <Input
+                  readOnly
+                  size="small"
+                  value={startCommand}
+                  style={{ fontFamily: 'monospace', fontSize: 11 }}
+                />
+                <Button
+                  size="small"
+                  icon={<CopyOutlined />}
+                  onClick={onCopyStartCommand}
+                  title="Copy command"
+                />
+              </Space.Compact>
+              {copiedStart && (
+                <Typography.Text type="success" style={{ fontSize: 11 }}>
+                  Copied — paste into a terminal and press Enter.
+                </Typography.Text>
+              )}
+            </Space>
           )}
         </Space>
 

@@ -1,9 +1,12 @@
 # ─── build artefacts ─────────────────────────────────────────
 # Loose binary if user runs `go build -o dualsub ./cmd/dualsub` at root.
 /dualsub
+/dualsub.exe
 # Or built inside the daemon tree.
 /daemon/dualsub
+/daemon/dualsub.exe
 /daemon/cmd/dualsub/dualsub
+/daemon/cmd/dualsub/dualsub.exe
 
 # ─── Go ──────────────────────────────────────────────────────
 *.test
@@ -23,6 +26,7 @@ yarn-error.log*
 # ─── IDE / editor ────────────────────────────────────────────
 .idea/
 .vscode/
+.claude/
 *.swp
 *~
 
