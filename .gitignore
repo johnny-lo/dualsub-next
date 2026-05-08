@@ -1,0 +1,45 @@
+# ─── build artefacts ─────────────────────────────────────────
+# Loose binary if user runs `go build -o dualsub ./cmd/dualsub` at root.
+/dualsub
+# Or built inside the daemon tree.
+/daemon/dualsub
+/daemon/cmd/dualsub/dualsub
+
+# ─── Go ──────────────────────────────────────────────────────
+*.test
+*.out
+coverage.txt
+vendor/
+
+# ─── Node / Vite (extension) ─────────────────────────────────
+/extension/node_modules/
+/extension/dist/
+/extension/.vite/
+/extension/.turbo/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# ─── IDE / editor ────────────────────────────────────────────
+.idea/
+.vscode/
+*.swp
+*~
+
+# ─── OS ──────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+
+# ─── runtime ─────────────────────────────────────────────────
+*.log
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+
+# ─── defensive: secrets / local config ───────────────────────
+# The daemon's real config lives in ~/.config/dualsub/, never in the tree.
+config.toml
+.env
+.env.*
+!.env.example
