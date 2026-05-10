@@ -20,6 +20,8 @@ func NewClaude(opts ClaudeOptions) Provider {
 
 func (p *claudeProvider) Name() string { return "claude" }
 
+func (p *claudeProvider) DefaultModel() string { return "" }
+
 func (p *claudeProvider) Translate(_ context.Context, _ Request) (Response, error) {
 	return Response{}, &Error{
 		Code:     CodeNotImplemented,

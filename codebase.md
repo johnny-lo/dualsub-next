@@ -85,16 +85,16 @@ Live mode skips the popup: content script directly calls
 | `src/content/extractors/types.ts` | `SubtitleExtractor` interface, `SiteId` union, `ExtractError`. |
 | `src/content/extractors/index.ts` | `detectSite()` factory — single registration point for new sites. |
 | `src/content/extractors/NetflixExtractor.ts` | Netflix extractor. `video.textTracks` for both extraction and observation. |
-| `src/content/extractors/UdemyExtractor.ts` | Udemy extractor. **Tier 1 REST API for extraction** (Tier 2 textTrack as fallback only). **`observeUdemyCaptions` polls `[class*="well--text"]` every 250ms for live observation** — Udemy's [CC] track does not populate `video.textTracks`. |
+| `src/content/extractors/UdemyExtractor.ts` | Udemy extractor. **Tier 1 REST API for extraction** (Tier 2 textTrack as fallback only). **`observeUdemyCaptions` polls DOM every 300ms for live observation** — Udemy's [CC] track does not populate `video.textTracks`. Primary selector is `[data-purpose="captions-cue-text"]`; broad selectors (`[class*="caption"]` etc.) are fallback only. |
 | `src/content/extractors/cueObserver.ts` | TextTrack-based cue subscription. Used by Netflix; **NOT used by Udemy** (Udemy uses DOM polling — see §7). Emits `ActiveCue { texts: string[], ... }` so multiple simultaneous cues stay distinct (cache keys are per-cue). |
 | `src/content/extractors/textTrack.ts` | Helper: `waitForCues` + `cuesToEntries` for full-transcript bulk extraction. |
 | `src/content/extractors/parseVtt.ts` | VTT parser used by Udemy Tier 1. |
-| `src/content/overlay/SubtitleOverlay.ts` | Shadow-DOM bilingual overlay. Drag-to-reposition. `setTranslations()` replaces, `patchTranslations()` merges. `render(texts: string[] \| null)` builds one `(original, translated)` pair per active cue; lookup uses `normalizeText()`. |
-| `src/popup/App.tsx` | Main UI. Daemon status, provider dropdown, Translate flow with per-chunk overlay updates, Live mode switch, recent jobs, Extract & Copy fallback. |
-| `src/options/App.tsx` | Antd Form covering server / translate / cache / 3 providers. Saves via `client.putConfig()`; UI tells user to restart daemon. |
+| `src/content/overlay/SubtitleOverlay.ts` | Shadow-DOM bilingual overlay. Drag-to-reposition. `setTranslations()` replaces, `patchTranslations()` merges. `render(texts: string[] \| null)` builds one `(original, translated)` pair per active cue; lookup uses `normalizeText()`. Hides native captions via injected `<style>` (`opacity: 0`). Supports `OverlayStyle` (font size/color) stored in `chrome.storage.local` under `dualsubOverlayStyle`. |
+| `src/popup/App.tsx` | Main UI. Daemon status, provider dropdown, Translate flow with per-chunk overlay updates, Live mode switch, recent jobs, Extract & Copy fallback, paste-back textarea for manual translation import, video translation status indicator (queries `PING_OVERLAY`). |
+| `src/options/App.tsx` | Antd Form covering server / translate / cache / 3 providers. Saves via `client.putConfig()`; UI tells user to restart daemon. Also has "Subtitle Overlay Style" section for font size/color settings (saved to `chrome.storage.local`). |
 | `src/shared/DaemonClient.ts` | One class wrapping daemon HTTP + SSE. `translate(req, handlers)` returns an abort fn. |
 | `src/shared/messaging.ts` | `ContentMessage` discriminated union + `sendToActiveTab()`. **All popup ↔ content message types live here**, nowhere else. |
-| `src/shared/transcript.ts` | `TranscriptEntry`, `formatTranscriptForExport`, `normalizeText`, `parseTranslatedTranscript`. |
+| `src/shared/transcript.ts` | `TranscriptEntry`, `formatTranscriptForExport`, `normalizeText`, `parseTranslatedTranscript`. `parseTranslatedTranscript` is used by the popup paste-back flow to parse `[index] text` format. |
 
 ## 4. Critical contracts (cross-file invariants)
 
@@ -146,6 +146,7 @@ both sides** — the TS dispatcher is a string switch.
 | `chunk-done` | per chunk success — incl. cache batch as `chunk=0`/`source="cache"` | `{chunk, source, lines}` |
 | `chunk-error` | per attempt; `final=true` only on terminal failure | `{chunk, code, message, retryable, attempt, final}` |
 | `done` | once at end | `{job_id, total, completed, failed, cache_hits}` |
+| `fatal` | setup/persistence failure that prevents trustworthy job execution | `{code, message}` |
 
 ### 4.4 Cache key (`cache.Key`)
 
@@ -187,9 +188,9 @@ Drop one and you'll silently break either disk persistence or the HTTP API.
   setup errors return from `Translate()`; runtime failures are events.
 - **Tests**: `:memory:` SQLite + mock provider for orchestrator.
   `httptest.NewServer` + mock provider for HTTP routes. Live API tests are
-  gated by `//go:build integration` and `*_API_KEY` env vars. **34 tests
+  gated by `//go:build integration` and `*_API_KEY` env vars. **38 tests
   total** across daemon (cache 7 + config 5 + logger 2 + provider 7 + server
-  6 + translate 7).
+  7 + translate 10).
 - **Concurrency**: SQLite uses `SetMaxOpenConns(1)`; do not parallelise
   writes. Orchestrator parallelism is `Config.Concurrency` (default 3).
   Provider HTTP timeout is 90s default; 5min for Ollama (cold model load).
@@ -277,12 +278,18 @@ There is no migration story. Either:
   doesn't survive page reload (intentional — re-translate is fine for
   self-use; chrome.storage adds churn). Don't "fix" this.
 - **Udemy [CC] is not in `video.textTracks`**. The Udemy player renders
-  [CC] caption text into a DOM element matching `[class*="well--text"]` and
-  never populates the HTML5 TextTrack API for it. `UdemyExtractor` therefore
-  uses `observeUdemyCaptions` (250 ms DOM poll) for live observation, and
-  `extractFullTranscript` prefers Tier 1 REST API. Tier 2 / `observeViaTextTracks`
-  works on Netflix only. [自動] tracks may sometimes populate textTracks, but
-  routing everything through DOM keeps extraction and observation aligned.
+  [CC] caption text into a DOM element matching `[data-purpose="captions-cue-text"]`
+  (class `captions-display--captions-cue-text--*`) and never populates the
+  HTML5 TextTrack API for it. `UdemyExtractor` therefore uses
+  `observeUdemyCaptions` (300ms DOM poll + MutationObserver) for live observation,
+  and `extractFullTranscript` prefers Tier 1 REST API. The primary selector
+  `[data-purpose="captions-cue-text"]` is authoritative — when it exists, broad
+  fallback selectors are not consulted (to avoid picking up unrelated page
+  elements like the progress tooltip or language menu).
+- **Native caption hiding**: `SubtitleOverlay` injects a `<style>` that sets
+  `opacity: 0` on `[class*="captions-display--"]` and `video::cue`. Uses
+  `opacity` (not `display: none`) so `textContent` remains readable for cue
+  detection. Removed on `overlay.destroy()`.
 - **Udemy SPA lecture switching swaps the `<video>` element**. `startCueObserver`
   in `content/index.ts` re-attaches every time it is called — do not re-add a
   "skip if disposer exists" guard.
@@ -319,7 +326,7 @@ These are decisions, not omissions. Each was discussed with the user.
 ```bash
 # daemon: vet + all tests
 cd daemon && go vet ./... && go test ./...
-# expect: 34 tests across cache(7) config(5) logger(2) provider(7) server(6) translate(7)
+# expect: 38 tests across cache(7) config(5) logger(2) provider(7) server(7) translate(10)
 
 # daemon: live integration (real keys; auto-skipped without env)
 GEMINI_API_KEY=...   go test -tags=integration ./internal/provider/ -run TestGeminiLive -v
@@ -372,5 +379,5 @@ If you change … then check …
 - **Tier 1 / Tier 2** (Udemy) — Tier 1 = Udemy REST API → VTT URL → fetch
   → parse. Tier 2 = HTML5 TextTrack fallback. **Tier 1 is the primary path**
   (TextTrack is unreliable on Udemy — see §7). Live observation goes through
-  DOM polling (`observeUdemyCaptions`) on `[class*="well--text"]` regardless
-  of which extraction tier succeeded.
+  DOM polling (`observeUdemyCaptions`) on `[data-purpose="captions-cue-text"]`
+  regardless of which extraction tier succeeded.

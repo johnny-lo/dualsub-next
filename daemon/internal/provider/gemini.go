@@ -36,6 +36,8 @@ func NewGemini(opts GeminiOptions) Provider {
 
 func (p *geminiProvider) Name() string { return "gemini" }
 
+func (p *geminiProvider) DefaultModel() string { return p.opts.DefaultModel }
+
 type geminiPart struct {
 	Text string `json:"text"`
 }

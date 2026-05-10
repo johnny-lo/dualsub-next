@@ -3,6 +3,7 @@ import {
   Alert,
   Button,
   Card,
+  ColorPicker,
   ConfigProvider,
   Divider,
   Form,
@@ -14,6 +15,7 @@ import {
 } from 'antd'
 import { SaveOutlined } from '@ant-design/icons'
 import { DaemonClient, type DaemonConfig } from '@/shared/DaemonClient'
+import type { OverlayStyle } from '@/content/overlay/SubtitleOverlay'
 
 const client = new DaemonClient()
 
@@ -30,6 +32,14 @@ export default function App() {
   const [saveState, setSaveState] = useState<SaveState>({ state: 'idle' })
   const [form] = Form.useForm<DaemonConfig>()
 
+  const [overlayStyle, setOverlayStyle] = useState<Required<OverlayStyle>>({
+    originalSize: 18,
+    originalColor: '#ffffff',
+    translatedSize: 18,
+    translatedColor: '#ffd54f',
+  })
+  const [styleSaved, setStyleSaved] = useState(false)
+
   useEffect(() => {
     void (async () => {
       try {
@@ -42,8 +52,20 @@ export default function App() {
         setLoading(false)
       }
     })()
+    chrome.storage.local.get(['dualsubOverlayStyle'], (data) => {
+      if (data.dualsubOverlayStyle) {
+        setOverlayStyle((prev) => ({ ...prev, ...data.dualsubOverlayStyle }))
+      }
+    })
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
+
+  const onSaveOverlayStyle = () => {
+    chrome.storage.local.set({ dualsubOverlayStyle: overlayStyle }, () => {
+      setStyleSaved(true)
+      setTimeout(() => setStyleSaved(false), 2000)
+    })
+  }
 
   const onSave = async () => {
     setSaveState({ state: 'saving' })
@@ -208,6 +230,69 @@ export default function App() {
             />
           )}
         </Form>
+
+        <Divider orientation="left" style={{ margin: '24px 0 16px' }}>
+          Subtitle Overlay Style
+        </Divider>
+
+        <Card size="small" title="Original text (source language)" style={{ marginBottom: 12 }}>
+          <Space size="middle" wrap>
+            <div>
+              <Typography.Text style={{ fontSize: 12 }}>Font size (px)</Typography.Text>
+              <InputNumber
+                min={10}
+                max={48}
+                value={overlayStyle.originalSize}
+                onChange={(v) => v && setOverlayStyle((s) => ({ ...s, originalSize: v }))}
+                style={{ display: 'block', marginTop: 4 }}
+              />
+            </div>
+            <div>
+              <Typography.Text style={{ fontSize: 12 }}>Color</Typography.Text>
+              <div style={{ marginTop: 4 }}>
+                <ColorPicker
+                  value={overlayStyle.originalColor}
+                  onChange={(_, hex) => setOverlayStyle((s) => ({ ...s, originalColor: hex }))}
+                />
+              </div>
+            </div>
+          </Space>
+        </Card>
+
+        <Card size="small" title="Translated text (target language)" style={{ marginBottom: 12 }}>
+          <Space size="middle" wrap>
+            <div>
+              <Typography.Text style={{ fontSize: 12 }}>Font size (px)</Typography.Text>
+              <InputNumber
+                min={10}
+                max={48}
+                value={overlayStyle.translatedSize}
+                onChange={(v) => v && setOverlayStyle((s) => ({ ...s, translatedSize: v }))}
+                style={{ display: 'block', marginTop: 4 }}
+              />
+            </div>
+            <div>
+              <Typography.Text style={{ fontSize: 12 }}>Color</Typography.Text>
+              <div style={{ marginTop: 4 }}>
+                <ColorPicker
+                  value={overlayStyle.translatedColor}
+                  onChange={(_, hex) => setOverlayStyle((s) => ({ ...s, translatedColor: hex }))}
+                />
+              </div>
+            </div>
+          </Space>
+        </Card>
+
+        <Space>
+          <Button type="primary" icon={<SaveOutlined />} onClick={onSaveOverlayStyle}>
+            Save Style
+          </Button>
+          {styleSaved && (
+            <Typography.Text type="success">
+              Saved! Reload the video page to apply.
+            </Typography.Text>
+          )}
+        </Space>
       </div>
     </ConfigProvider>
   )

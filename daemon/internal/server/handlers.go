@@ -31,10 +31,7 @@ type providerInfo struct {
 func (s *Server) handleProviders(w http.ResponseWriter, _ *http.Request) {
 	out := make([]providerInfo, 0, len(s.providers))
 	for name, p := range s.providers {
-		info := providerInfo{Name: name}
-		if mp, ok := p.(interface{ DefaultModel() string }); ok {
-			info.DefaultModel = mp.DefaultModel()
-		}
+		info := providerInfo{Name: name, DefaultModel: p.DefaultModel()}
 		out = append(out, info)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
@@ -52,14 +49,14 @@ const (
 // ─── /v1/translate (SSE) ────────────────────────────────────────────────────
 
 type translateRequest struct {
-	Site       string           `json:"site"`
-	VideoKey   string           `json:"video_key"`
-	Title      string           `json:"title"`
-	Provider   string           `json:"provider"`
-	Model      string           `json:"model,omitempty"`
-	SourceLang string           `json:"source_lang"`
-	TargetLang string           `json:"target_lang"`
-	Lines      []provider.Line  `json:"lines"`
+	Site       string          `json:"site"`
+	VideoKey   string          `json:"video_key"`
+	Title      string          `json:"title"`
+	Provider   string          `json:"provider"`
+	Model      string          `json:"model,omitempty"`
+	SourceLang string          `json:"source_lang"`
+	TargetLang string          `json:"target_lang"`
+	Lines      []provider.Line `json:"lines"`
 }
 
 func (s *Server) handleTranslate(w http.ResponseWriter, r *http.Request) {

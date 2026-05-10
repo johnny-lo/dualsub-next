@@ -14,6 +14,7 @@ import {
   Typography,
 } from 'antd'
 import {
+  CheckOutlined,
   CopyOutlined,
   ReloadOutlined,
   SettingOutlined,
@@ -22,12 +23,14 @@ import {
 } from '@ant-design/icons'
 import {
   formatTranscriptForExport,
+  parseTranslatedTranscript,
   type TranscriptPayload,
 } from '@/shared/transcript'
 import {
   sendToActiveTab,
   type ContentMessage,
   type ExtractTranscriptResponse,
+  type OverlayStatus,
   type SimpleAck,
 } from '@/shared/messaging'
 import {
@@ -102,6 +105,8 @@ export default function App() {
   const [chosen, setChosen] = useState<string>('')
   const [liveMode, setLiveMode] = useState(false)
 
+  const [overlayStatus, setOverlayStatus] = useState<OverlayStatus | null>(null)
+
   const [extract, setExtract] = useState<ExtractState>({ state: 'idle' })
   const [job, setJob] = useState<TranslateJob | null>(null)
   const [recentJobs, setRecentJobs] = useState<JobSummary[]>([])
@@ -142,8 +147,20 @@ export default function App() {
     }
   }
 
+  const refreshOverlayStatus = async () => {
+    try {
+      const status = await sendToActiveTab<OverlayStatus>({
+        type: 'PING_OVERLAY',
+      } satisfies ContentMessage)
+      if (status?.ok) setOverlayStatus(status)
+    } catch {
+      setOverlayStatus(null)
+    }
+  }
+
   useEffect(() => {
     void refreshDaemon()
+    void refreshOverlayStatus()
     return () => abortRef.current?.()
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
@@ -171,6 +188,44 @@ export default function App() {
       setExtract({ state: 'copied', entries: res.payload.entries.length, payload: res.payload })
     } catch (err) {
       setExtract({ state: 'error', code: 'MESSAGING_FAILED', message: (err as Error).message })
+    }
+  }
+
+  // ─── paste-back translated text ─────────────────────────────────────────
+
+  const [pasteText, setPasteText] = useState('')
+  const [pasteResult, setPasteResult] = useState<{ ok: boolean; message: string } | null>(null)
+
+  const onApplyPasted = async () => {
+    if (!pasteText.trim()) return
+    const parsed = parseTranslatedTranscript(pasteText)
+    if (parsed.length === 0) {
+      setPasteResult({ ok: false, message: 'No [index] lines found. Use [1] text format.' })
+      return
+    }
+    // We need the source payload to map index → original text
+    const sourcePayload = extract.state === 'copied' ? extract.payload : job?.source
+    if (!sourcePayload) {
+      setPasteResult({ ok: false, message: 'Extract subtitles first so we can match indices.' })
+      return
+    }
+    const byIndex = new Map<number, string>()
+    for (const e of sourcePayload.entries) byIndex.set(e.index, e.originalText)
+    const translations: Record<string, string> = {}
+    for (const p of parsed) {
+      const orig = byIndex.get(p.index)
+      if (orig) translations[orig] = p.translatedText
+    }
+    try {
+      await sendToActiveTab<SimpleAck>({
+        type: 'SET_OVERLAY',
+        videoKey: sourcePayload.videoKey,
+        translations,
+      } satisfies ContentMessage)
+      setPasteResult({ ok: true, message: `Applied ${Object.keys(translations).length} translations to overlay.` })
+      void refreshOverlayStatus()
+    } catch (err) {
+      setPasteResult({ ok: false, message: (err as Error).message })
     }
   }
 
@@ -231,7 +286,14 @@ export default function App() {
       },
       {
         onJobCreated: (info) =>
-          setJob((j) => j && { ...j, totalChunks: info.total_chunks, cacheHits: info.cache_hits }),
+          setJob((j) =>
+            j && {
+              ...j,
+              totalChunks: info.total_chunks,
+              totalLines: info.total_lines,
+              cacheHits: info.cache_hits,
+            },
+          ),
         onChunkDone: (ck) => {
           setJob((j) => {
             if (!j) return j
@@ -254,9 +316,16 @@ export default function App() {
             if (!err.final) return j
             return { ...j, errors: [...j.errors, err] }
           }),
-        onDone: () => {
-          setJob((j) => j && { ...j, status: 'done' })
+        onDone: (done) => {
+          setJob((j) =>
+            j && {
+              ...j,
+              status: 'done',
+              completedChunks: done.completed,
+            },
+          )
           void client.listJobs(5).then(setRecentJobs).catch(() => {})
+          void refreshOverlayStatus()
         },
         onFatal: (err) =>
           setJob((j) => j && { ...j, status: 'done', fatal: err.message }),
@@ -300,10 +369,15 @@ export default function App() {
     await navigator.clipboard.writeText(text)
   }
 
-  const progressPct = useMemo(() => {
-    if (!job || job.totalChunks === 0) return 0
-    return Math.round((job.completedChunks / job.totalChunks) * 100)
+  const translatedLineCount = useMemo(() => {
+    if (!job) return 0
+    return new Set(job.translated.map((line) => line.index)).size
   }, [job])
+
+  const progressPct = useMemo(() => {
+    if (!job || job.totalLines === 0) return 0
+    return Math.min(100, Math.round((translatedLineCount / job.totalLines) * 100))
+  }, [job, translatedLineCount])
 
   return (
     <ConfigProvider>
@@ -369,6 +443,23 @@ export default function App() {
           )}
         </Space>
 
+        {/* Current video translation status */}
+        <div style={{ marginTop: 10, padding: '6px 10px', background: '#f5f5f5', borderRadius: 4 }}>
+          <Space size="small">
+            <span style={{ fontSize: 12 }}>Current video:</span>
+            {overlayStatus === null ? (
+              <Tag color="default">no subtitle page</Tag>
+            ) : overlayStatus.translationsCount > 0 ? (
+              <Tag color="green">translated ({overlayStatus.translationsCount} lines)</Tag>
+            ) : overlayStatus.mounted ? (
+              <Tag color="orange">overlay active, no translations</Tag>
+            ) : (
+              <Tag color="default">not translated</Tag>
+            )}
+            {overlayStatus?.liveMode && <Tag color="blue">Live</Tag>}
+          </Space>
+        </div>
+
         <Divider style={{ margin: '14px 0 10px' }} />
 
         {/* Translate */}
@@ -421,10 +512,12 @@ export default function App() {
               <>
                 <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12 }}>
                   <span>
-                    {job.completedChunks}/{job.totalChunks} chunks
+                    {job.totalChunks > 0
+                      ? `${job.completedChunks}/${job.totalChunks} chunks`
+                      : 'cache only'}
                     {job.cacheHits > 0 ? ` · ${job.cacheHits} cached` : ''}
                   </span>
-                  <span>{job.translated.length} / {job.totalLines} lines</span>
+                  <span>{translatedLineCount} / {job.totalLines} lines</span>
                 </div>
                 <Progress
                   percent={progressPct}
@@ -546,6 +639,36 @@ export default function App() {
             <Alert type="error" showIcon message={extract.code} description={extract.message} />
           )}
         </Space>
+
+        <div style={{ marginTop: 10 }}>
+          <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+            Paste translated result here (keep [index] format):
+          </Typography.Text>
+          <Input.TextArea
+            rows={4}
+            value={pasteText}
+            onChange={(e) => { setPasteText(e.target.value); setPasteResult(null) }}
+            placeholder={'[1] 翻譯後的文字\n[2] 第二行翻譯\n...'}
+            style={{ marginTop: 4, fontSize: 12 }}
+          />
+          <Button
+            icon={<CheckOutlined />}
+            onClick={onApplyPasted}
+            disabled={!pasteText.trim()}
+            block
+            style={{ marginTop: 6 }}
+          >
+            Apply to overlay
+          </Button>
+          {pasteResult && (
+            <Alert
+              type={pasteResult.ok ? 'success' : 'error'}
+              showIcon
+              message={pasteResult.message}
+              style={{ marginTop: 6 }}
+            />
+          )}
+        </div>
       </div>
     </ConfigProvider>
   )

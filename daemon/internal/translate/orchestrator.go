@@ -69,6 +69,15 @@ type Input struct {
 	Lines      []provider.Line
 }
 
+const (
+	codeBadInput        = "BAD_INPUT"
+	codeUnknownProvider = "UNKNOWN_PROVIDER"
+	codeCacheLookupFail = "CACHE_LOOKUP_FAILED"
+	codeJobCreateFail   = "JOB_CREATE_FAILED"
+	codeJobUpdateFail   = "JOB_UPDATE_FAILED"
+	codeCacheStoreFail  = "CACHE_STORE_FAILED"
+)
+
 // Translate runs the chunked translation flow and emits events on out.
 // The caller owns reading from out; Translate closes the channel before returning.
 // Translate itself returns nil for normal completion (including partial). It only
@@ -77,26 +86,26 @@ func (o *Orchestrator) Translate(ctx context.Context, in Input, out chan<- Event
 	defer close(out)
 
 	if len(in.Lines) == 0 {
-		return errors.New("no lines to translate")
+		err := errors.New("no lines to translate")
+		emitFatal(ctx, out, codeBadInput, err)
+		return err
 	}
 	prov, ok := o.providers[in.Provider]
 	if !ok {
-		return fmt.Errorf("unknown provider %q", in.Provider)
+		err := fmt.Errorf("unknown provider %q", in.Provider)
+		emitFatal(ctx, out, codeUnknownProvider, err)
+		return err
 	}
-	model := in.Model
-	if model == "" {
-		// Provider's defaults will be used; for cache key we need something stable.
-		// We rely on the provider to canonicalize; for cache key purposes we use
-		// the literal "" which still partitions the cache by provider.
-		model = ""
-	}
+	model := canonicalModel(prov, in.Model)
 
 	jobID := uuid.NewString()
 
 	// 1. Cache lookup, line-by-line.
 	cachedLines, todoLines, err := o.partitionByCache(ctx, in, model)
 	if err != nil {
-		return fmt.Errorf("cache lookup: %w", err)
+		err = fmt.Errorf("cache lookup: %w", err)
+		emitFatal(ctx, out, codeCacheLookupFail, err)
+		return err
 	}
 
 	// 2. Chunk the to-do lines.
@@ -104,10 +113,14 @@ func (o *Orchestrator) Translate(ctx context.Context, in Input, out chan<- Event
 	totalChunks := len(chunks)
 
 	// 3. Persist a job record.
-	_ = o.cache.CreateJob(ctx, cache.Job{
+	if err := o.cache.CreateJob(ctx, cache.Job{
 		ID: jobID, VideoKey: in.VideoKey, Provider: in.Provider, Model: model,
 		Status: "running", TotalChunks: totalChunks,
-	})
+	}); err != nil {
+		err = fmt.Errorf("create job: %w", err)
+		emitFatal(ctx, out, codeJobCreateFail, err)
+		return err
+	}
 
 	// 4. Emit job-created.
 	out <- Event{Type: EventJobCreated, Payload: JobCreatedPayload{
@@ -164,7 +177,9 @@ func (o *Orchestrator) Translate(ctx context.Context, in Input, out chan<- Event
 	} else if failed > 0 && completed == 0 {
 		status = "failed"
 	}
-	_ = o.cache.UpdateJob(ctx, jobID, status, completed, failed, "")
+	if err := o.cache.UpdateJob(ctx, jobID, status, completed, failed, ""); err != nil {
+		emitFatal(ctx, out, codeJobUpdateFail, fmt.Errorf("update job: %w", err))
+	}
 
 	out <- Event{Type: EventDone, Payload: DonePayload{
 		JobID:     jobID,
@@ -174,6 +189,20 @@ func (o *Orchestrator) Translate(ctx context.Context, in Input, out chan<- Event
 		CacheHits: len(cachedLines),
 	}}
 	return nil
+}
+
+func canonicalModel(prov provider.Provider, requested string) string {
+	if requested != "" {
+		return requested
+	}
+	return prov.DefaultModel()
+}
+
+func emitFatal(ctx context.Context, out chan<- Event, code string, err error) {
+	select {
+	case out <- Event{Type: EventFatal, Payload: FatalPayload{Code: code, Message: err.Error()}}:
+	case <-ctx.Done():
+	}
 }
 
 func (o *Orchestrator) partitionByCache(ctx context.Context, in Input, model string) (cached []provider.TranslatedLine, todo []provider.Line, err error) {
@@ -224,11 +253,17 @@ func (o *Orchestrator) runChunk(
 			return false
 		}
 		req := provider.Request{
-			Lines: chunk, SourceLang: in.SourceLang, TargetLang: in.TargetLang, Model: in.Model,
+			Lines: chunk, SourceLang: in.SourceLang, TargetLang: in.TargetLang, Model: model,
 		}
 		res, err := prov.Translate(ctx, req)
 		if err == nil {
-			o.persistChunk(ctx, in, model, prov.Name(), chunk, res.Lines)
+			if err := o.persistChunk(ctx, in, model, prov.Name(), chunk, res.Lines); err != nil && ctx.Err() == nil {
+				out <- Event{Type: EventChunkError, Payload: ChunkErrorPayload{
+					Chunk: chunkNum, Code: codeCacheStoreFail,
+					Message:   "translation succeeded but cache write failed: " + err.Error(),
+					Retryable: false, Attempt: attempt, Final: true,
+				}}
+			}
 			out <- Event{Type: EventChunkDone, Payload: ChunkDonePayload{
 				Chunk: chunkNum, Source: "llm", Lines: res.Lines,
 			}}
@@ -271,7 +306,7 @@ func (o *Orchestrator) persistChunk(
 	provName string,
 	originals []provider.Line,
 	translated []provider.TranslatedLine,
-) {
+) error {
 	byIdx := make(map[int]string, len(translated))
 	for _, t := range translated {
 		byIdx[t.Index] = t.Text
@@ -292,5 +327,5 @@ func (o *Orchestrator) persistChunk(
 			TranslatedText: text,
 		})
 	}
-	_ = o.cache.StoreTranslations(ctx, entries)
+	return o.cache.StoreTranslations(ctx, entries)
 }

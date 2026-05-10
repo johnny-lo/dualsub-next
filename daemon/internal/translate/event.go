@@ -9,6 +9,7 @@ const (
 	EventChunkDone  EventType = "chunk-done"
 	EventChunkError EventType = "chunk-error"
 	EventDone       EventType = "done"
+	EventFatal      EventType = "fatal"
 )
 
 type Event struct {
@@ -26,8 +27,8 @@ type JobCreatedPayload struct {
 // ChunkDonePayload is emitted both for cache hits (Source="cache", Chunk=0)
 // and for successful LLM chunks (Source="llm", Chunk=1..TotalChunks).
 type ChunkDonePayload struct {
-	Chunk  int                        `json:"chunk"`
-	Source string                     `json:"source"`
+	Chunk  int                       `json:"chunk"`
+	Source string                    `json:"source"`
 	Lines  []provider.TranslatedLine `json:"lines"`
 }
 
@@ -46,4 +47,9 @@ type DonePayload struct {
 	Completed int    `json:"completed"`
 	Failed    int    `json:"failed"`
 	CacheHits int    `json:"cache_hits"`
+}
+
+type FatalPayload struct {
+	Code    string `json:"code"`
+	Message string `json:"message"`
 }

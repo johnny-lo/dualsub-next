@@ -21,6 +21,8 @@ type mockProvider struct{}
 
 func (m *mockProvider) Name() string { return "mock" }
 
+func (m *mockProvider) DefaultModel() string { return "mock-model" }
+
 func (m *mockProvider) Translate(_ context.Context, in provider.Request) (provider.Response, error) {
 	out := make([]provider.TranslatedLine, len(in.Lines))
 	for i, l := range in.Lines {
@@ -103,6 +105,9 @@ func TestProvidersListing(t *testing.T) {
 	if len(list) != 1 || list[0]["name"] != "mock" {
 		t.Errorf("got %v", list)
 	}
+	if list[0]["default_model"] != "mock-model" {
+		t.Errorf("default_model = %v, want mock-model", list[0]["default_model"])
+	}
 }
 
 func TestTranslateSSE(t *testing.T) {
@@ -143,6 +148,50 @@ func TestTranslateSSE(t *testing.T) {
 		if eventTypes[i] != w {
 			t.Errorf("event[%d] = %s, want %s", i, eventTypes[i], w)
 		}
+	}
+}
+
+func TestTranslateSSEFatalFromOrchestrator(t *testing.T) {
+	ctx := newTestServer(t)
+	defer ctx.ts.Close()
+	if err := ctx.cache.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	body := strings.NewReader(`{
+		"site":"test","video_key":"v1","provider":"mock",
+		"source_lang":"en","target_lang":"zh-TW",
+		"lines":[{"index":1,"text":"Hello"}]
+	}`)
+	res, err := http.Post(ctx.ts.URL+"/v1/translate", "application/json", body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer res.Body.Close()
+	if res.StatusCode != 200 {
+		b, _ := io.ReadAll(res.Body)
+		t.Fatalf("status %d: %s", res.StatusCode, b)
+	}
+
+	events := readSSEEvents(t, res.Body)
+	if len(events) != 1 {
+		t.Fatalf("got events %+v, want exactly one fatal event", events)
+	}
+	if events[0].name != "fatal" {
+		t.Fatalf("event = %s, want fatal", events[0].name)
+	}
+	var payload struct {
+		Code    string `json:"code"`
+		Message string `json:"message"`
+	}
+	if err := json.Unmarshal([]byte(events[0].data), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload.Code != "CACHE_LOOKUP_FAILED" {
+		t.Fatalf("fatal code = %s, want CACHE_LOOKUP_FAILED", payload.Code)
+	}
+	if !strings.Contains(payload.Message, "cache lookup") {
+		t.Fatalf("fatal message = %q, want cache lookup context", payload.Message)
 	}
 }
 
@@ -254,3 +303,35 @@ func TestConfigGetPut(t *testing.T) {
 	}
 }
 
+type sseEvent struct {
+	name string
+	data string
+}
+
+func readSSEEvents(t *testing.T, r io.Reader) []sseEvent {
+	t.Helper()
+	var events []sseEvent
+	var current sseEvent
+	scanner := bufio.NewScanner(r)
+	for scanner.Scan() {
+		line := scanner.Text()
+		switch {
+		case strings.HasPrefix(line, "event: "):
+			current.name = strings.TrimPrefix(line, "event: ")
+		case strings.HasPrefix(line, "data: "):
+			if current.data != "" {
+				current.data += "\n"
+			}
+			current.data += strings.TrimPrefix(line, "data: ")
+		case line == "":
+			if current.name != "" || current.data != "" {
+				events = append(events, current)
+				current = sseEvent{}
+			}
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		t.Fatal(err)
+	}
+	return events
+}

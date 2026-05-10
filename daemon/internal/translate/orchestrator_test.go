@@ -3,6 +3,7 @@ package translate
 import (
 	"context"
 	"errors"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -19,14 +20,23 @@ type mockResponse struct {
 }
 
 type mockProvider struct {
-	name  string
-	queue []mockResponse
-	calls atomic.Int32
+	name         string
+	defaultModel string
+	queue        []mockResponse
+	calls        atomic.Int32
+	modelsMu     sync.Mutex
+	models       []string
 }
 
 func (m *mockProvider) Name() string { return m.name }
 
-func (m *mockProvider) Translate(_ context.Context, _ provider.Request) (provider.Response, error) {
+func (m *mockProvider) DefaultModel() string { return m.defaultModel }
+
+func (m *mockProvider) Translate(_ context.Context, in provider.Request) (provider.Response, error) {
+	m.modelsMu.Lock()
+	m.models = append(m.models, in.Model)
+	m.modelsMu.Unlock()
+
 	n := int(m.calls.Add(1)) - 1
 	if n >= len(m.queue) {
 		return provider.Response{}, errors.New("mock: out of responses")
@@ -156,9 +166,9 @@ func TestCacheHits(t *testing.T) {
 	pre := make([]cache.TranslationEntry, 3)
 	for i := 0; i < 3; i++ {
 		pre[i] = cache.TranslationEntry{
-			Key:            cache.Key("mock", "", "en", "zh-TW", lines[i].Text),
-			Provider:       "mock",
-			SourceLang:     "en", TargetLang: "zh-TW",
+			Key:        cache.Key("mock", "", "en", "zh-TW", lines[i].Text),
+			Provider:   "mock",
+			SourceLang: "en", TargetLang: "zh-TW",
 			OriginalText:   lines[i].Text,
 			TranslatedText: "[cached]" + lines[i].Text,
 		}
@@ -199,6 +209,167 @@ func TestCacheHits(t *testing.T) {
 				t.Errorf("unexpected job-created: %+v", p)
 			}
 		}
+	}
+}
+
+func TestDefaultModelUsedForProviderRequestAndCacheKey(t *testing.T) {
+	ctx := context.Background()
+	lines := mkLines(1)
+	m := &mockProvider{name: "mock", defaultModel: "model-a", queue: []mockResponse{
+		{lines: translatedFor(lines)},
+	}}
+	o, c := newOrch(t, m)
+
+	events := collect(t, func(out chan<- Event) error {
+		return o.Translate(ctx, Input{
+			VideoKey: "v1", Provider: "mock",
+			SourceLang: "en", TargetLang: "zh-TW", Lines: lines,
+		}, out)
+	})
+
+	if got := countByType(events, EventChunkDone); got != 1 {
+		t.Fatalf("chunk-done count = %d, want 1", got)
+	}
+	if got := m.calls.Load(); got != 1 {
+		t.Fatalf("provider calls = %d, want 1", got)
+	}
+	if len(m.models) != 1 || m.models[0] != "model-a" {
+		t.Fatalf("provider saw models %v, want [model-a]", m.models)
+	}
+
+	modelKey := cache.Key("mock", "model-a", "en", "zh-TW", lines[0].Text)
+	modelHits, err := c.LookupTranslations(ctx, []string{modelKey})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := modelHits[modelKey]; got == "" {
+		t.Fatal("translation was not cached under the provider default model")
+	}
+
+	blankKey := cache.Key("mock", "", "en", "zh-TW", lines[0].Text)
+	blankHits, err := c.LookupTranslations(ctx, []string{blankKey})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := blankHits[blankKey]; ok {
+		t.Fatal("translation was also cached under an empty model")
+	}
+}
+
+func TestAllCacheHitsDoNotCallProviderAndReportZeroChunks(t *testing.T) {
+	ctx := context.Background()
+	lines := mkLines(3)
+	model := "model-a"
+
+	c, err := cache.Open(":memory:")
+	if err != nil {
+		t.Fatalf("open cache: %v", err)
+	}
+	defer c.Close()
+
+	entries := make([]cache.TranslationEntry, len(lines))
+	for i, line := range lines {
+		entries[i] = cache.TranslationEntry{
+			Key:            cache.Key("mock", model, "en", "zh-TW", line.Text),
+			Provider:       "mock",
+			Model:          model,
+			SourceLang:     "en",
+			TargetLang:     "zh-TW",
+			OriginalText:   line.Text,
+			TranslatedText: "[cached]" + line.Text,
+		}
+	}
+	if err := c.StoreTranslations(ctx, entries); err != nil {
+		t.Fatal(err)
+	}
+
+	m := &mockProvider{name: "mock", defaultModel: model}
+	o := New(map[string]provider.Provider{"mock": m}, c, Config{
+		ChunkSize: 30, Concurrency: 1, MaxAttempts: 1,
+	})
+	o.sleep = func(_ time.Duration) {}
+
+	events := collect(t, func(out chan<- Event) error {
+		return o.Translate(ctx, Input{
+			VideoKey: "v1", Provider: "mock",
+			SourceLang: "en", TargetLang: "zh-TW", Lines: lines,
+		}, out)
+	})
+
+	if got := m.calls.Load(); got != 0 {
+		t.Fatalf("provider calls = %d, want 0", got)
+	}
+	if got := countByType(events, EventChunkDone); got != 1 {
+		t.Fatalf("chunk-done count = %d, want 1 cache event", got)
+	}
+
+	var sawCache bool
+	for _, e := range events {
+		switch e.Type {
+		case EventJobCreated:
+			p := e.Payload.(JobCreatedPayload)
+			if p.TotalChunks != 0 || p.TotalLines != len(lines) || p.CacheHits != len(lines) {
+				t.Errorf("job-created payload = %+v", p)
+			}
+		case EventChunkDone:
+			p := e.Payload.(ChunkDonePayload)
+			if p.Source == "cache" {
+				sawCache = true
+				if p.Chunk != 0 || len(p.Lines) != len(lines) {
+					t.Errorf("cache chunk payload = %+v", p)
+				}
+			}
+		case EventDone:
+			p := e.Payload.(DonePayload)
+			if p.Total != 0 || p.Completed != 0 || p.Failed != 0 || p.CacheHits != len(lines) {
+				t.Errorf("done payload = %+v", p)
+			}
+		}
+	}
+	if !sawCache {
+		t.Fatal("expected cache chunk-done event")
+	}
+}
+
+func TestCacheLookupFailureEmitsFatal(t *testing.T) {
+	ctx := context.Background()
+	lines := mkLines(1)
+	c, err := cache.Open(":memory:")
+	if err != nil {
+		t.Fatalf("open cache: %v", err)
+	}
+	if err := c.Close(); err != nil {
+		t.Fatalf("close cache: %v", err)
+	}
+
+	m := &mockProvider{name: "mock", queue: []mockResponse{
+		{lines: translatedFor(lines)},
+	}}
+	o := New(map[string]provider.Provider{"mock": m}, c, Config{
+		ChunkSize: 30, Concurrency: 1, MaxAttempts: 1,
+	})
+
+	out := make(chan Event, 8)
+	err = o.Translate(ctx, Input{
+		VideoKey: "v1", Provider: "mock",
+		SourceLang: "en", TargetLang: "zh-TW", Lines: lines,
+	}, out)
+	if err == nil {
+		t.Fatal("expected cache lookup error")
+	}
+
+	var fatal *FatalPayload
+	for e := range out {
+		if e.Type == EventFatal {
+			p := e.Payload.(FatalPayload)
+			fatal = &p
+		}
+	}
+	if fatal == nil {
+		t.Fatal("expected fatal event")
+	}
+	if fatal.Code != codeCacheLookupFail {
+		t.Fatalf("fatal code = %s, want %s", fatal.Code, codeCacheLookupFail)
 	}
 }
 

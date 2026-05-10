@@ -10,6 +10,7 @@ import (
 
 type Provider interface {
 	Name() string
+	DefaultModel() string
 	Translate(ctx context.Context, in Request) (Response, error)
 }
 

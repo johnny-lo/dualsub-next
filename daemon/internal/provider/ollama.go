@@ -36,6 +36,8 @@ func NewOllama(opts OllamaOptions) Provider {
 
 func (p *ollamaProvider) Name() string { return "ollama" }
 
+func (p *ollamaProvider) DefaultModel() string { return p.opts.DefaultModel }
+
 type ollamaMessage struct {
 	Role    string `json:"role"`
 	Content string `json:"content"`

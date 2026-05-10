@@ -9,7 +9,64 @@ import { ExtractError, type ActiveCue, type CueObserver, type SubtitleExtractor 
 // reactivity when Udemy swaps the cue text) with a 300ms interval (catches
 // cases where the observer doesn't fire — e.g. textContent changes inside
 // nodes that are themselves replaced before MO sees them).
-const UDEMY_CUE_SELECTOR = '[class*="well--text"]'
+const UDEMY_CUE_SELECTORS = [
+  '[data-purpose="captions-cue-text"]',
+  '[class*="captions-display--"]',
+  '[class*="well--text"]',
+  '[class*="well--"]',
+  '[class*="caption"]',
+  '[class*="Caption"]',
+  '[class*="subtitle"]',
+  '[class*="Subtitle"]',
+  '[data-purpose*="caption"]',
+  '[data-purpose*="subtitle"]',
+  '[data-testid*="caption"]',
+  '[data-testid*="subtitle"]',
+]
+
+function isVisibleCaptionCandidate(el: HTMLElement): boolean {
+  const text = el.textContent?.trim() ?? ''
+  if (!text || text.length > 400) return false
+
+  const rect = el.getBoundingClientRect()
+  if (rect.width === 0 || rect.height === 0) return false
+  if (rect.bottom < 0 || rect.top > window.innerHeight) return false
+  if (rect.right < 0 || rect.left > window.innerWidth) return false
+
+  const style = window.getComputedStyle(el)
+  if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') {
+    return false
+  }
+  return true
+}
+
+function findUdemyCaptionText(): string {
+  // Prefer the exact cue-text element Udemy uses for rendering active captions.
+  // Skip visibility check — we may have hidden it ourselves via CSS.
+  // If the element exists, always trust it (return empty when no cue is active
+  // instead of falling through to broad selectors that pick up unrelated text).
+  const cueText = document.querySelector<HTMLElement>('[data-purpose="captions-cue-text"]')
+  if (cueText) {
+    const text = cueText.textContent?.trim() ?? ''
+    return text.length <= 400 ? text : ''
+  }
+
+  const candidates: HTMLElement[] = []
+  for (const selector of UDEMY_CUE_SELECTORS) {
+    candidates.push(...Array.from(document.querySelectorAll<HTMLElement>(selector)))
+  }
+
+  const visible = candidates.filter(isVisibleCaptionCandidate)
+  visible.sort((a, b) => {
+    const cls = (el: HTMLElement) => el.getAttribute('class') ?? ''
+    const aCue = cls(a).includes('captions-display--') || cls(a).includes('well--') ? 1 : 0
+    const bCue = cls(b).includes('captions-display--') || cls(b).includes('well--') ? 1 : 0
+    if (aCue !== bCue) return bCue - aCue
+    return 0
+  })
+
+  return visible[0]?.textContent?.trim() ?? ''
+}
 
 function observeUdemyCaptions(observer: CueObserver): () => void {
   let lastText = ''
@@ -23,8 +80,7 @@ function observeUdemyCaptions(observer: CueObserver): () => void {
     }
   }
   const tick = () => {
-    const el = document.querySelector<HTMLElement>(UDEMY_CUE_SELECTOR)
-    emit(el?.textContent?.trim() ?? '')
+    emit(findUdemyCaptionText())
   }
   const interval = window.setInterval(tick, 300)
   const mo = new MutationObserver(tick)

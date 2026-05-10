@@ -34,6 +34,8 @@ func NewOpenAI(opts OpenAIOptions) Provider {
 
 func (p *openaiProvider) Name() string { return "openai" }
 
+func (p *openaiProvider) DefaultModel() string { return p.opts.DefaultModel }
+
 type openaiMessage struct {
 	Role    string `json:"role"`
 	Content string `json:"content"`

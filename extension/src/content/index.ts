@@ -230,7 +230,7 @@ chrome.runtime.onMessage.addListener(
         mounted: overlay !== null,
         liveMode,
         videoKey: currentVideoKey,
-        translationsCount: 0, // SubtitleOverlay doesn't expose this; fine for status check
+        translationsCount: overlay?.translationsCount ?? 0,
       } satisfies OverlayStatus)
       return false
     }

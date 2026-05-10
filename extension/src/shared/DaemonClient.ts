@@ -51,6 +51,11 @@ export interface DonePayload {
   cache_hits: number
 }
 
+export interface FatalPayload {
+  code: string
+  message: string
+}
+
 export interface TranslateHandlers {
   onJobCreated?: (p: JobCreatedPayload) => void
   onChunkDone?: (p: ChunkDonePayload) => void
@@ -219,5 +224,10 @@ function dispatch(
     case 'done':
       h.onDone?.(parsed.data as DonePayload)
       break
+    case 'fatal': {
+      const p = parsed.data as FatalPayload
+      h.onFatal?.(new Error(`${p.code}: ${p.message}`))
+      break
+    }
   }
 }
