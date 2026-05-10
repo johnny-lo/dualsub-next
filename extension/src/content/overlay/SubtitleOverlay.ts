@@ -139,9 +139,33 @@ export class SubtitleOverlay {
     if (this.nativeCaptionStyle) return
     this.nativeCaptionStyle = document.createElement('style')
     this.nativeCaptionStyle.id = 'dualsub-hide-native-captions'
+    // Hide every known native caption surface across Udemy versions + Netflix.
+    // Use opacity:0 + visibility:hidden + color:transparent for defense in
+    // depth — host CSS sometimes wins over a single property. textContent
+    // reads work regardless of visibility/opacity, so the cue extractor still
+    // sees the text. The fallback selector path in UdemyExtractor checks for
+    // this style element's id and bypasses its visibility filter accordingly.
     this.nativeCaptionStyle.textContent = `
-      [class*="captions-display--"] { opacity: 0 !important; pointer-events: none !important; }
-      video::cue { opacity: 0 !important; }
+      [class*="captions-display--"],
+      [class*="captions-cue--"],
+      [class*="well--text--"],
+      [class*="well--container--"],
+      [data-purpose="captions-cue-text"],
+      [data-purpose="captions-display"],
+      .player-timedtext,
+      .player-timedtext-text-container {
+        opacity: 0 !important;
+        visibility: hidden !important;
+        color: transparent !important;
+        text-shadow: none !important;
+        pointer-events: none !important;
+      }
+      video::cue {
+        opacity: 0 !important;
+        color: transparent !important;
+        background-color: transparent !important;
+        text-shadow: none !important;
+      }
     `
     document.head.appendChild(this.nativeCaptionStyle)
   }
@@ -190,25 +214,52 @@ export class SubtitleOverlay {
 
   /**
    * Resolve the rendered text → cached translation. Tries an exact normalized
-   * match first; on miss, falls back to substring containment to bridge the
-   * gap when the cache was built from a different caption track than the one
-   * the player is rendering (e.g. Udemy [CC] vs [自動]: similar wording, but
-   * different cue boundaries make exact keys diverge).
+   * match first; on miss, falls back to (a) longest-substring containment and
+   * (b) word-overlap Jaccard. Bridges Udemy VTT-vs-DOM divergence and
+   * cross-track key drift (e.g. [CC] vs [自動]).
    */
   private lookupTranslation(originalText: string): string | null {
     const normalized = normalizeText(originalText)
+    if (!normalized) return null
+
     const exact = this.translations.get(normalized)
     if (exact) return exact
 
-    if (normalized.length < 10) return null
+    let best: { value: string; score: number } | null = null
+
+    // Pass 1: substring containment, score = matched length.
     for (const [key, value] of this.translations) {
-      if (key.length < 10) continue
+      if (key.length < 4) continue
       const shorter = Math.min(normalized.length, key.length)
       const longer = Math.max(normalized.length, key.length)
-      if (shorter / longer < 0.6) continue
-      if (normalized.includes(key) || key.includes(normalized)) return value
+      if (longer === 0 || shorter / longer < 0.3) continue
+      if (normalized.includes(key) || key.includes(normalized)) {
+        if (!best || shorter > best.score) best = { value, score: shorter }
+      }
     }
-    return null
+    if (best) return best.value
+
+    // Pass 2: word-overlap Jaccard for cases where punctuation/word-order differs.
+    const words = normalized.split(' ').filter((w) => w.length >= 2)
+    if (words.length < 2) return null
+    const wordSet = new Set(words)
+    let bestJ: { value: string; score: number } | null = null
+    for (const [key, value] of this.translations) {
+      const kWords = key.split(' ').filter((w) => w.length >= 2)
+      if (kWords.length < 2) continue
+      const kSet = new Set(kWords)
+      let inter = 0
+      for (const w of wordSet) if (kSet.has(w)) inter++
+      const union = wordSet.size + kSet.size - inter
+      const j = union === 0 ? 0 : inter / union
+      if (j >= 0.6 && (!bestJ || j > bestJ.score)) bestJ = { value, score: j }
+    }
+    return bestJ?.value ?? null
+  }
+
+  /** Debug-only: snapshot the translation map keys (first N). */
+  debugSampleKeys(n = 8): string[] {
+    return Array.from(this.translations.keys()).slice(0, n)
   }
 
   render(originalTexts: string[] | null): void {

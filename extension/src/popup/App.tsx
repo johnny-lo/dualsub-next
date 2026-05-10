@@ -261,12 +261,19 @@ export default function App() {
     }
 
     // Mount overlay with empty translations so cues start showing originals
-    // immediately; chunks will patch in translations as they arrive.
+    // immediately; chunks will patch in translations as they arrive. Also
+    // register autoTranslate config so the content script keeps translating
+    // subsequent Udemy lectures without the user clicking again.
     try {
       await sendToActiveTab<SimpleAck>({
         type: 'SET_OVERLAY',
         videoKey: payload.videoKey,
         translations: {},
+        autoTranslate: {
+          provider: chosen,
+          sourceLang: PREFERRED_SOURCE,
+          targetLang: TARGET_LANG,
+        },
       } satisfies ContentMessage)
     } catch {
       // overlay is best-effort; don't abort the translate

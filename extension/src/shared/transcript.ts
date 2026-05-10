@@ -13,8 +13,22 @@ export interface TranscriptPayload {
   entries: TranscriptEntry[]
 }
 
+// Player DOM textContent diverges from VTT source text (smart quotes,
+// half/full-width punctuation, stripped inline tags, line-break differences).
+// Normalize aggressively so VTT-keyed translations still match cue text the
+// player renders. Keeps CJK characters via Unicode property escapes — \w would
+// drop them.
 export function normalizeText(text: string): string {
-  return text.toLowerCase().replace(/\s+/g, ' ').trim()
+  return text
+    .normalize('NFKC')
+    .toLowerCase()
+    .replace(/[‘’‚‛′]/g, "'")
+    .replace(/[“”„‟″]/g, '"')
+    .replace(/[–—−]/g, '-')
+    .replace(/[…]/g, '...')
+    .replace(/[\p{P}\p{S}]/gu, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
 }
 
 export function formatTranscriptForExport(

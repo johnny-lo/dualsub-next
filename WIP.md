@@ -1,5 +1,110 @@
 # Work In Progress
 
+## Session 2026-05-10 (evening): cross-track lookup + sticky auto-translate
+
+Linux end-to-end bring-up + 3 user-facing bugs + 1 small daemon gap noted.
+
+### Environment
+
+- Built daemon on Linux (`go1.22.2` against `go.mod` `go 1.25.0` — works
+  but should be reconciled). All `go test ./...` green.
+- Picked `gemini-flash-latest` after confirming `gemini-3-flash` is not a
+  real API model name (404). Stable alias auto-tracks newest free-tier Flash.
+- Ollama install deferred — sudo prompt couldn't be satisfied from the agent
+  shell, and disk download too long for the session.
+
+### Bugs fixed
+
+#### 1. Overlay rendered English only, no Chinese — FIXED
+Symptom: popup correctly reported "translated 23 lines" (via `PING_OVERLAY`
+→ `overlay.translationsCount`) but every cue rendered with empty Chinese.
+
+Root cause: **VTT-extracted text ≠ player-rendered DOM text**. Tier 1 REST
+API parses the VTT file and uses VTT-source strings as map keys. The cue
+observer reads `[data-purpose="captions-cue-text"]` from DOM. Smart quotes,
+half/full-width punctuation, inline-tag stripping, line-break differences,
+and multi-track ambiguity (`en-US` vs `en-auto-generated`) all mean the
+keys never match.
+
+Fixes (`shared/transcript.ts`, `content/overlay/SubtitleOverlay.ts`):
+- `normalizeText` now does NFKC + lowercase + smart-quote/dash mapping +
+  strips `\p{P}\p{S}` (preserves CJK chars via Unicode property escapes,
+  not `\w` which would drop them).
+- `lookupTranslation` now does (a) longest-substring containment with
+  threshold dropped from 10/0.6 to 4/0.3, picking best-by-length not
+  first-hit, (b) word-overlap Jaccard ≥ 0.6 fallback for word-order /
+  punctuation drift.
+
+#### 2. Native captions still visible despite hide CSS — FIXED
+Hide CSS only matched `[class*="captions-display--"]` + `video::cue` —
+missed `well--text--*` (legacy), `well--container--*`, `captions-cue--*`,
+the cue-text element itself, and Netflix's `.player-timedtext`.
+
+Fix (`SubtitleOverlay.hideNativeCaptions`): widened selector list, layered
+`opacity:0` + `visibility:hidden` + `color:transparent` + `text-shadow:none`
+for defense in depth. Updated `UdemyExtractor.isVisibleCaptionCandidate` to
+bypass the style-based visibility filter when `#dualsub-hide-native-captions`
+is mounted — otherwise our own hide style would defeat the fallback path
+(re-introducing the WIP-1 issue from the morning session).
+
+#### 3. Switching Udemy lecture left new lectures untranslated — FIXED
+SPA-nav handler already detected pushState/replaceState/popstate and
+called `stopAll()`, but only restored from cache on the new lecture. New
+(uncached) lectures sat at "extracted English, no Chinese" until the user
+manually clicked Translate again.
+
+Fix (`content/index.ts` + `popup/App.tsx` + `shared/messaging.ts`):
+- `SET_OVERLAY` message gained an `autoTranslate?: { provider, sourceLang,
+  targetLang }` field. Popup includes it on every Translate.
+- Content script stores it as `autoTranslateConfig`, persists to
+  `chrome.storage.local` under `dualsubAutoTranslate`. Survives page
+  reload + browser restart.
+- `stopAll({ forNavigation: true })` preserves `liveMode` and
+  `autoTranslateConfig` across SPA nav (only `CLEAR_OVERLAY` clears them).
+- New `autoTranslateCurrentLecture()`: cache-checks first (no wasted daemon
+  call), then extracts + streams translation through daemon, gating each
+  chunk on `currentVideoKey === videoKey` to prevent late chunks from a
+  prior lecture leaking into the new one.
+- New `bootstrap()` runs at content-script load: restores `autoTranslateConfig`
+  from storage, restores cached overlay, fires auto-translate if no cache
+  and config present.
+
+### Debug helper
+
+`window.__dualsubDebug` exposed in content-script isolated world (also
+`globalThis` mirror — CRXJS dynamic-import sometimes drops `window` writes).
+Use from DevTools after switching context dropdown to "DualSub Next":
+
+```js
+__dualsubDebug.diag()      // cue text, sample stored keys, lookup result, sticky config
+__dualsubDebug.dumpAll()   // full chrome.storage.local.dualsubTranslationCache
+```
+
+Install confirmation log: `[DualSub] __dualsubDebug installed: ["diag","dumpAll"]`.
+
+### Known small gap (not fixed)
+
+- `daemon/internal/translate/orchestrator.go:180` always passes `""` as the
+  job summary on `cache.UpdateJob`, so `/v1/jobs` reports `error_summary: ""`
+  even when chunks failed. SSE `chunk-error` events still carry the detail.
+
+### Files changed this session
+
+- `extension/src/content/extractors/UdemyExtractor.ts` — bypass visibility
+  filter when hide style is mounted
+- `extension/src/content/overlay/SubtitleOverlay.ts` — improved
+  `lookupTranslation`, broader `hideNativeCaptions`, public
+  `debugSampleKeys`
+- `extension/src/content/index.ts` — `autoTranslateConfig` lifecycle,
+  `autoTranslateCurrentLecture`, `bootstrap`, `__dualsubDebug` global,
+  `forNavigation` flag on `stopAll`
+- `extension/src/popup/App.tsx` — sends `autoTranslate` in `SET_OVERLAY`
+- `extension/src/shared/messaging.ts` — `autoTranslate` field on
+  `SET_OVERLAY` message
+- `extension/src/shared/transcript.ts` — stronger `normalizeText`
+
+---
+
 ## Session 2026-05-10: Udemy caption fix + overlay features
 
 ### Issues fixed

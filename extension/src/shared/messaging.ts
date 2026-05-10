@@ -6,6 +6,14 @@ export type ContentMessage =
       type: 'SET_OVERLAY'
       videoKey: string
       translations: Record<string, string> // replaces existing map
+      // When present, content script remembers this config and will
+      // auto-translate subsequent lectures (Udemy SPA navigation) that
+      // haven't been cached yet — until CLEAR_OVERLAY explicitly opts out.
+      autoTranslate?: {
+        provider: string
+        sourceLang: string
+        targetLang: string
+      }
     }
   | {
       type: 'PATCH_OVERLAY'

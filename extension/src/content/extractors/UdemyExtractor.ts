@@ -33,6 +33,12 @@ function isVisibleCaptionCandidate(el: HTMLElement): boolean {
   if (rect.bottom < 0 || rect.top > window.innerHeight) return false
   if (rect.right < 0 || rect.left > window.innerWidth) return false
 
+  // When our own hide stylesheet is mounted, native caption containers will
+  // (intentionally) report visibility:hidden / opacity:0. Bypass the style
+  // filter so the fallback path can still pick them — layout checks above
+  // already weed out elements with no rendered area.
+  if (document.getElementById('dualsub-hide-native-captions')) return true
+
   const style = window.getComputedStyle(el)
   if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') {
     return false

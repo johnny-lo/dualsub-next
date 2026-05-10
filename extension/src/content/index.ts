@@ -2,6 +2,7 @@ import { detectSite } from './extractors'
 import { ExtractError, type ActiveCue } from './extractors/types'
 import { SubtitleOverlay } from './overlay/SubtitleOverlay'
 import { DaemonClient } from '@/shared/DaemonClient'
+import { normalizeText } from '@/shared/transcript'
 import type {
   ContentMessage,
   ExtractTranscriptResponse,
@@ -23,6 +24,19 @@ let liveProvider = ''
 let liveTargetLang = '繁體中文'
 const inflightLive = new Set<string>()
 const daemon = new DaemonClient()
+
+// "Sticky" full-pass translate config — set when the user clicks Translate
+// (popup sends SET_OVERLAY with autoTranslate). Persists across SPA lecture
+// navigation so each new lecture is auto-translated with the same provider
+// without the user having to click again. Cleared by CLEAR_OVERLAY.
+const AUTO_TRANSLATE_KEY = 'dualsubAutoTranslate'
+interface AutoTranslateConfig {
+  provider: string
+  sourceLang: string
+  targetLang: string
+}
+let autoTranslateConfig: AutoTranslateConfig | null = null
+let autoTranslateAbort: (() => void) | null = null
 
 // ─── persistent overlay cache ───────────────────────────────────────────
 // Translations are stored per videoKey in chrome.storage.local so that
@@ -94,14 +108,83 @@ function startCueObserver() {
   cueDisposer = extractor.observeCurrentCue(handleCue)
 }
 
-function stopAll() {
+// `forNavigation`: tear down DOM-bound state (overlay, cue observer) but keep
+// liveMode + autoTranslateConfig so the new lecture inherits user intent.
+// Default (no flag) wipes everything — used by CLEAR_OVERLAY (explicit opt-out).
+function stopAll(opts?: { forNavigation?: boolean }) {
   cueDisposer?.()
   cueDisposer = null
   overlay?.destroy()
   overlay = null
   currentVideoKey = null
-  liveMode = false
   inflightLive.clear()
+  autoTranslateAbort?.()
+  autoTranslateAbort = null
+  if (!opts?.forNavigation) {
+    liveMode = false
+    autoTranslateConfig = null
+    void chrome.storage.local.remove(AUTO_TRANSLATE_KEY)
+  }
+}
+
+async function autoTranslateCurrentLecture(): Promise<void> {
+  if (!extractor || !autoTranslateConfig) return
+  const videoKey = extractor.videoKey()
+
+  // Cache hit → restoreOverlayFromStorage already handled it; skip the daemon call.
+  const cached = await readStoredTranslations(videoKey)
+  if (cached) return
+
+  let entries
+  try {
+    entries = await extractor.extractFullTranscript(autoTranslateConfig.sourceLang)
+  } catch (err) {
+    console.warn('[DualSub] auto-translate: extract failed:', err)
+    return
+  }
+  if (entries.length === 0) return
+
+  console.log(`[DualSub] auto-translating ${entries.length} cues for ${videoKey}`)
+  currentVideoKey = videoKey
+  ensureOverlay().setTranslations({})
+  startCueObserver()
+
+  const byIndex = new Map<number, string>()
+  for (const e of entries) byIndex.set(e.index, e.originalText)
+
+  autoTranslateAbort?.()
+  autoTranslateAbort = daemon.translate(
+    {
+      site: extractor.site,
+      video_key: videoKey,
+      title: extractor.title(),
+      provider: autoTranslateConfig.provider,
+      source_lang: autoTranslateConfig.sourceLang,
+      target_lang: autoTranslateConfig.targetLang,
+      lines: entries.map((e) => ({ index: e.index, text: e.originalText })),
+    },
+    {
+      onChunkDone: (ck) => {
+        // Race guard: another navigation may have happened mid-stream.
+        if (!overlay || currentVideoKey !== videoKey) return
+        const map: Record<string, string> = {}
+        for (const l of ck.lines) {
+          const orig = byIndex.get(l.index)
+          if (orig) map[orig] = l.text
+        }
+        if (Object.keys(map).length > 0) {
+          overlay.patchTranslations(map)
+          void writeStoredTranslations(videoKey, map, 'merge')
+        }
+      },
+      onDone: () => {
+        console.log(`[DualSub] auto-translate done for ${videoKey}`)
+      },
+      onFatal: (err) => {
+        console.warn(`[DualSub] auto-translate failed for ${videoKey}:`, err.message)
+      },
+    },
+  )
 }
 
 function handleCue(cue: ActiveCue | null) {
@@ -187,6 +270,10 @@ chrome.runtime.onMessage.addListener(
       ensureOverlay().setTranslations(msg.translations)
       startCueObserver()
       void writeStoredTranslations(msg.videoKey, msg.translations, 'replace')
+      if (msg.autoTranslate) {
+        autoTranslateConfig = msg.autoTranslate
+        void chrome.storage.local.set({ [AUTO_TRANSLATE_KEY]: msg.autoTranslate })
+      }
       sendResponse({ ok: true } satisfies SimpleAck)
       return false
     }
@@ -239,10 +326,63 @@ chrome.runtime.onMessage.addListener(
   },
 )
 
-// On load: if this video already has translations cached from a prior
-// session, mount the overlay immediately so playback shows Chinese without
-// the user having to click Translate again.
-void restoreOverlayFromStorage()
+// Debug helper — accessible in DevTools after switching the Console context
+// dropdown from "top" to the DualSub Next content-script context. Use:
+//   __dualsubDebug.diag()      → cue text, sample keys, lookup result
+//   __dualsubDebug.dumpAll()   → full translation map (large)
+//
+// Assign to BOTH window and globalThis: in CRXJS-loaded content scripts the
+// isolated-world `window` binding is sometimes a Proxy that drops dynamically
+// added properties; globalThis is a direct ref to the real global object.
+const debugApi = {
+  diag() {
+    const cueText =
+      document
+        .querySelector<HTMLElement>('[data-purpose="captions-cue-text"]')
+        ?.textContent?.trim() ?? '(no captions-cue-text element)'
+    return {
+      site: extractor?.site ?? 'unsupported',
+      videoKey: extractor?.videoKey() ?? null,
+      currentVideoKey,
+      hasOverlay: overlay !== null,
+      translationCount: overlay?.translationsCount ?? 0,
+      sampleStoredKeys: overlay?.debugSampleKeys(8) ?? [],
+      currentCueText: cueText,
+      currentCueNormalized: normalizeText(cueText),
+      lookupSucceeds: overlay?.hasTranslation(cueText) ?? false,
+      liveMode,
+      autoTranslateConfig,
+    }
+  },
+  async dumpAll() {
+    return new Promise<unknown>((resolve) => {
+      chrome.storage.local.get(['dualsubTranslationCache'], (data) => resolve(data))
+    })
+  },
+}
+;(globalThis as unknown as { __dualsubDebug: typeof debugApi }).__dualsubDebug = debugApi
+;(window as unknown as { __dualsubDebug: typeof debugApi }).__dualsubDebug = debugApi
+console.log('[DualSub] __dualsubDebug installed:', Object.keys(debugApi))
+
+// On load: restore the sticky auto-translate config first (so SPA nav after
+// a content-script restart still inherits user intent), then mount any
+// cached overlay. If no cache but autoTranslate is set for this fresh page,
+// kick off an auto-translate so the user doesn't have to click Translate
+// after a full reload.
+async function bootstrap() {
+  await new Promise<void>((resolve) => {
+    chrome.storage.local.get([AUTO_TRANSLATE_KEY], (data) => {
+      const cfg = data[AUTO_TRANSLATE_KEY] as AutoTranslateConfig | undefined
+      if (cfg && typeof cfg.provider === 'string') autoTranslateConfig = cfg
+      resolve()
+    })
+  })
+  await restoreOverlayFromStorage()
+  if (!overlay && autoTranslateConfig) {
+    await autoTranslateCurrentLecture()
+  }
+}
+void bootstrap()
 
 // Udemy switches between lectures via SPA navigation — the URL changes via
 // pushState without a page reload, the <video> element is replaced, and the
@@ -255,11 +395,22 @@ if (extractor?.site === 'udemy') {
     if (location.pathname === lastPathname) return
     lastPathname = location.pathname
     console.log('[DualSub] Udemy SPA navigation, refreshing overlay')
-    stopAll()
+    stopAll({ forNavigation: true })
     // Wait a tick for Udemy to mount the new lecture's DOM before we
     // try to query videoKey / well--text.
-    setTimeout(() => {
-      void restoreOverlayFromStorage()
+    setTimeout(async () => {
+      await restoreOverlayFromStorage()
+      // If the new lecture wasn't cached but the user previously opted in to
+      // translation (autoTranslateConfig present), auto-fire a fresh
+      // translate so they don't have to click again on every lecture.
+      if (!overlay && autoTranslateConfig) {
+        await autoTranslateCurrentLecture()
+      }
+      // Re-arm live mode for the new lecture if it was on previously.
+      if (liveMode) {
+        ensureOverlay()
+        startCueObserver()
+      }
     }, 500)
   }
   const origPushState = history.pushState.bind(history)
