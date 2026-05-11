@@ -26,6 +26,7 @@ type mockProvider struct {
 	calls        atomic.Int32
 	modelsMu     sync.Mutex
 	models       []string
+	block        chan struct{}
 }
 
 func (m *mockProvider) Name() string { return m.name }
@@ -36,6 +37,9 @@ func (m *mockProvider) Translate(_ context.Context, in provider.Request) (provid
 	m.modelsMu.Lock()
 	m.models = append(m.models, in.Model)
 	m.modelsMu.Unlock()
+	if m.block != nil {
+		<-m.block
+	}
 
 	n := int(m.calls.Add(1)) - 1
 	if n >= len(m.queue) {
@@ -511,6 +515,58 @@ func TestPartialSuccess(t *testing.T) {
 				t.Errorf("total_chunks = %d, want 2", p.TotalChunks)
 			}
 		}
+	}
+}
+
+func TestCanceledJobIsNotLeftRunning(t *testing.T) {
+	lines := mkLines(60)
+	ctx, cancel := context.WithCancel(context.Background())
+	m := &mockProvider{name: "mock", block: make(chan struct{}), queue: []mockResponse{
+		{lines: translatedFor(lines[:30])},
+		{lines: translatedFor(lines[30:])},
+	}}
+	o, c := newOrch(t, m)
+	o.cfg.Concurrency = 1
+
+	out := make(chan Event, 64)
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- o.Translate(ctx, Input{
+			VideoKey: "v1", Provider: "mock",
+			SourceLang: "en", TargetLang: "zh-TW", Lines: lines,
+		}, out)
+	}()
+
+	var jobID string
+	for e := range out {
+		if e.Type == EventJobCreated {
+			jobID = e.Payload.(JobCreatedPayload).JobID
+			cancel()
+			close(m.block)
+		}
+	}
+	if err := <-errCh; err != nil {
+		t.Fatalf("translate returned error: %v", err)
+	}
+	if jobID == "" {
+		t.Fatal("missing job-created event")
+	}
+
+	job, err := c.GetJob(context.Background(), jobID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if job == nil {
+		t.Fatal("job not found")
+	}
+	if job.Status == "running" {
+		t.Fatal("canceled job was left running")
+	}
+	if job.CompletedAt == nil {
+		t.Fatal("canceled job should have completed_at")
+	}
+	if job.ErrorSummary == "" {
+		t.Fatal("canceled job should include an error summary")
 	}
 }
 

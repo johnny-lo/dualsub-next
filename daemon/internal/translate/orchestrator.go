@@ -172,12 +172,17 @@ func (o *Orchestrator) Translate(ctx context.Context, in Input, out chan<- Event
 
 	// 7. Final status + done event.
 	status := "completed"
+	summary := ""
+	if err := ctx.Err(); err != nil {
+		failed = totalChunks - completed
+		summary = err.Error()
+	}
 	if failed > 0 && completed > 0 {
 		status = "partial"
 	} else if failed > 0 && completed == 0 {
 		status = "failed"
 	}
-	if err := o.cache.UpdateJob(ctx, jobID, status, completed, failed, ""); err != nil {
+	if err := o.cache.UpdateJob(context.WithoutCancel(ctx), jobID, status, completed, failed, summary); err != nil {
 		emitFatal(ctx, out, codeJobUpdateFail, fmt.Errorf("update job: %w", err))
 	}
 

@@ -27,7 +27,7 @@ export class SubtitleOverlay {
   private styleEl: HTMLStyleElement
   private translations = new Map<string, string>()
   private dragging = false
-  private dragOffset = { x: 0, y: 0 }
+  private dragOffsetFromCenter = { x: 0, y: 0 }
   private readonly onFullscreenChange = () => this.mountHost()
   private nativeCaptionStyle: HTMLStyleElement | null = null
   private currentStyle: Required<OverlayStyle> = { ...DEFAULT_STYLE }
@@ -35,15 +35,18 @@ export class SubtitleOverlay {
   private onMouseDown = (e: MouseEvent) => {
     this.dragging = true
     const rect = this.container.getBoundingClientRect()
-    this.dragOffset = { x: e.clientX - rect.left, y: e.clientY - rect.top }
+    this.dragOffsetFromCenter = {
+      x: e.clientX - (rect.left + rect.width / 2),
+      y: e.clientY - (rect.top + rect.height / 2),
+    }
     e.preventDefault()
   }
   private onMouseMove = (e: MouseEvent) => {
     if (!this.dragging) return
-    this.container.style.left = `${e.clientX - this.dragOffset.x}px`
-    this.container.style.top = `${e.clientY - this.dragOffset.y}px`
+    this.container.style.left = `${e.clientX - this.dragOffsetFromCenter.x}px`
+    this.container.style.top = `${e.clientY - this.dragOffsetFromCenter.y}px`
     this.container.style.bottom = 'auto'
-    this.container.style.transform = 'none'
+    this.container.style.transform = 'translate(-50%, -50%)'
   }
   private onMouseUp = () => {
     this.dragging = false

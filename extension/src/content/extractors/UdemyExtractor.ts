@@ -11,22 +11,44 @@ import { ExtractError, type ActiveCue, type CueObserver, type SubtitleExtractor 
 // nodes that are themselves replaced before MO sees them).
 const UDEMY_CUE_SELECTORS = [
   '[data-purpose="captions-cue-text"]',
+  '[data-purpose="captions-display"]',
   '[class*="captions-display--"]',
-  '[class*="well--text"]',
-  '[class*="well--"]',
-  '[class*="caption"]',
-  '[class*="Caption"]',
-  '[class*="subtitle"]',
-  '[class*="Subtitle"]',
-  '[data-purpose*="caption"]',
-  '[data-purpose*="subtitle"]',
-  '[data-testid*="caption"]',
-  '[data-testid*="subtitle"]',
+  '[class*="captions-cue--"]',
+  '[class*="well--text--"]',
+  '[class*="well--container--"]',
 ]
+
+const UDEMY_NATIVE_CAPTION_SELECTORS = [
+  '[data-purpose="captions-cue-text"]',
+  '[data-purpose="captions-display"]',
+  '[class*="captions-display--"]',
+  '[class*="captions-cue--"]',
+  '[class*="well--text--"]',
+  '[class*="well--container--"]',
+]
+
+const UDEMY_NON_CUE_LABELS = new Set([
+  '英文',
+  '英語',
+  'english',
+  'english [auto]',
+  'english [cc]',
+  '繁體中文',
+  '简体中文',
+  '中文',
+  '字幕',
+  'subtitles',
+  'captions',
+])
+
+function isNativeCaptionElement(el: HTMLElement): boolean {
+  return UDEMY_NATIVE_CAPTION_SELECTORS.some((selector) => el.matches(selector))
+}
 
 function isVisibleCaptionCandidate(el: HTMLElement): boolean {
   const text = el.textContent?.trim() ?? ''
   if (!text || text.length > 400) return false
+  if (UDEMY_NON_CUE_LABELS.has(text.toLowerCase())) return false
 
   const rect = el.getBoundingClientRect()
   if (rect.width === 0 || rect.height === 0) return false
@@ -37,7 +59,9 @@ function isVisibleCaptionCandidate(el: HTMLElement): boolean {
   // (intentionally) report visibility:hidden / opacity:0. Bypass the style
   // filter so the fallback path can still pick them — layout checks above
   // already weed out elements with no rendered area.
-  if (document.getElementById('dualsub-hide-native-captions')) return true
+  if (document.getElementById('dualsub-hide-native-captions') && isNativeCaptionElement(el)) {
+    return true
+  }
 
   const style = window.getComputedStyle(el)
   if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') {
@@ -76,14 +100,27 @@ function findUdemyCaptionText(): string {
 
 function observeUdemyCaptions(observer: CueObserver): () => void {
   let lastText = ''
+  let clearTimer: number | null = null
+  const cancelPendingClear = () => {
+    if (clearTimer === null) return
+    window.clearTimeout(clearTimer)
+    clearTimer = null
+  }
   const emit = (text: string) => {
+    if (text === '') {
+      if (lastText === '' || clearTimer !== null) return
+      clearTimer = window.setTimeout(() => {
+        clearTimer = null
+        lastText = ''
+        observer(null)
+      }, 2000)
+      return
+    }
+
+    cancelPendingClear()
     if (text === lastText) return
     lastText = text
-    if (text === '') {
-      observer(null)
-    } else {
-      observer({ texts: [text], startTime: 0, endTime: 0 } satisfies ActiveCue)
-    }
+    observer({ texts: [text], startTime: 0, endTime: 0 } satisfies ActiveCue)
   }
   const tick = () => {
     emit(findUdemyCaptionText())
@@ -93,6 +130,7 @@ function observeUdemyCaptions(observer: CueObserver): () => void {
   mo.observe(document.body, { childList: true, subtree: true, characterData: true })
   tick()
   return () => {
+    cancelPendingClear()
     window.clearInterval(interval)
     mo.disconnect()
   }

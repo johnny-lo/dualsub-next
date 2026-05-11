@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import {
   Alert,
   Button,
@@ -63,6 +63,7 @@ type TranslateJob = {
   totalLines: number
   errors: ChunkErrorPayload[]
   translated: TranslatedLine[]
+  startedAt?: number
   fatal?: string
   source?: TranscriptPayload
 }
@@ -83,21 +84,6 @@ function detectStartCommand(): string {
   return './dualsub-watch.sh'
 }
 
-// Build a Record<original_text, translated_text> from a chunk payload.
-function makeChunkMap(
-  source: TranscriptPayload,
-  lines: TranslatedLine[],
-): Record<string, string> {
-  const byIndex = new Map<number, string>()
-  for (const e of source.entries) byIndex.set(e.index, e.originalText)
-  const out: Record<string, string> = {}
-  for (const l of lines) {
-    const orig = byIndex.get(l.index)
-    if (orig) out[orig] = l.text
-  }
-  return out
-}
-
 export default function App() {
   const [daemon, setDaemon] = useState<DaemonStatus>({ state: 'checking' })
   const [providers, setProviders] = useState<ProviderInfo[]>([])
@@ -110,8 +96,6 @@ export default function App() {
   const [extract, setExtract] = useState<ExtractState>({ state: 'idle' })
   const [job, setJob] = useState<TranslateJob | null>(null)
   const [recentJobs, setRecentJobs] = useState<JobSummary[]>([])
-  const abortRef = useRef<(() => void) | null>(null)
-
   const startCommand = useMemo(() => detectStartCommand(), [])
   const [copiedStart, setCopiedStart] = useState(false)
   const onCopyStartCommand = async () => {
@@ -122,6 +106,10 @@ export default function App() {
     } catch (err) {
       console.error('[DualSub] clipboard write failed:', err)
     }
+  }
+
+  const refreshRecentJobs = async () => {
+    setRecentJobs(await client.listJobs(5))
   }
 
   const refreshDaemon = async () => {
@@ -138,7 +126,7 @@ export default function App() {
         setProviderLoadError((err as Error).message)
       }
       try {
-        setRecentJobs(await client.listJobs(5))
+        await refreshRecentJobs()
       } catch {
         // ignore — non-essential
       }
@@ -161,9 +149,49 @@ export default function App() {
   useEffect(() => {
     void refreshDaemon()
     void refreshOverlayStatus()
-    return () => abortRef.current?.()
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
+
+  useEffect(() => {
+    if (daemon.state !== 'connected') return
+    const id = window.setInterval(() => {
+      void refreshRecentJobs().catch(() => {})
+      void refreshOverlayStatus()
+    }, 2500)
+    return () => window.clearInterval(id)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [daemon.state])
+
+  useEffect(() => {
+    if (!job?.source) return
+    const match = recentJobs.find(
+      (j) =>
+        j.video_key === job.source?.videoKey &&
+        j.provider === chosen &&
+        (!job.startedAt || j.created_at >= job.startedAt - 2),
+    )
+    if (!match) return
+    setJob((j) => {
+      if (!j) return j
+      const hasError = Boolean(match.error_summary)
+      return {
+        ...j,
+        status: match.status === 'running' ? 'running' : 'done',
+        totalChunks: match.total_chunks,
+        completedChunks: match.completed_chunks,
+        errors: hasError && j.errors.length === 0
+          ? [{
+              chunk: 0,
+              code: match.status.toUpperCase(),
+              message: match.error_summary,
+              retryable: false,
+              attempt: 1,
+              final: true,
+            }]
+          : j.errors,
+      }
+    })
+  }, [chosen, job?.source, recentJobs])
 
   // ─── one-click extract original (fallback) ───────────────────────────────
 
@@ -233,7 +261,6 @@ export default function App() {
 
   const onTranslate = async () => {
     if (!chosen) return
-    abortRef.current?.()
     setJob({
       status: 'extracting',
       totalChunks: 0,
@@ -279,70 +306,38 @@ export default function App() {
       // overlay is best-effort; don't abort the translate
     }
 
-    setJob((j) => j && { ...j, source: payload, status: 'running', totalLines: payload.entries.length })
-
-    abortRef.current = client.translate(
-      {
-        site: payload.site,
-        video_key: payload.videoKey,
-        title: payload.title,
-        provider: chosen,
-        source_lang: PREFERRED_SOURCE,
-        target_lang: TARGET_LANG,
-        lines: payload.entries.map((e) => ({ index: e.index, text: e.originalText })),
-      },
-      {
-        onJobCreated: (info) =>
-          setJob((j) =>
-            j && {
-              ...j,
-              totalChunks: info.total_chunks,
-              totalLines: info.total_lines,
-              cacheHits: info.cache_hits,
-            },
-          ),
-        onChunkDone: (ck) => {
-          setJob((j) => {
-            if (!j) return j
-            return {
-              ...j,
-              completedChunks: j.completedChunks + (ck.source === 'llm' ? 1 : 0),
-              translated: [...j.translated, ...ck.lines],
-            }
-          })
-          // patch overlay with this chunk's translations
-          void sendToActiveTab<SimpleAck>({
-            type: 'PATCH_OVERLAY',
-            videoKey: payload.videoKey,
-            translations: makeChunkMap(payload, ck.lines),
-          } satisfies ContentMessage).catch(() => {})
-        },
-        onChunkError: (err) =>
-          setJob((j) => {
-            if (!j) return j
-            if (!err.final) return j
-            return { ...j, errors: [...j.errors, err] }
-          }),
-        onDone: (done) => {
-          setJob((j) =>
-            j && {
-              ...j,
-              status: 'done',
-              completedChunks: done.completed,
-            },
-          )
-          void client.listJobs(5).then(setRecentJobs).catch(() => {})
-          void refreshOverlayStatus()
-        },
-        onFatal: (err) =>
-          setJob((j) => j && { ...j, status: 'done', fatal: err.message }),
+    setJob((j) =>
+      j && {
+        ...j,
+        source: payload,
+        status: 'running',
+        totalLines: payload.entries.length,
+        startedAt: Math.floor(Date.now() / 1000),
       },
     )
+
+    try {
+      await sendToActiveTab<SimpleAck>({
+        type: 'START_TRANSLATE',
+        payload,
+        request: {
+          site: payload.site,
+          video_key: payload.videoKey,
+          title: payload.title,
+          provider: chosen,
+          source_lang: PREFERRED_SOURCE,
+          target_lang: TARGET_LANG,
+          lines: payload.entries.map((e) => ({ index: e.index, text: e.originalText })),
+        },
+      } satisfies ContentMessage)
+      void refreshRecentJobs().catch(() => {})
+    } catch (err) {
+      setJob((j) => j && { ...j, status: 'done', fatal: (err as Error).message })
+    }
   }
 
   const onAbort = () => {
-    abortRef.current?.()
-    abortRef.current = null
+    void sendToActiveTab<SimpleAck>({ type: 'CANCEL_TRANSLATE' } satisfies ContentMessage).catch(() => {})
     setJob((j) => j && { ...j, status: 'aborted' })
   }
 

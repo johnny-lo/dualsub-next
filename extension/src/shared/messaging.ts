@@ -1,4 +1,5 @@
 import type { TranscriptPayload } from './transcript'
+import type { TranslateRequest } from './DaemonClient'
 
 export type ContentMessage =
   | { type: 'EXTRACT_TRANSCRIPT'; preferredLang?: string }
@@ -22,6 +23,12 @@ export type ContentMessage =
     }
   | { type: 'CLEAR_OVERLAY' }
   | { type: 'SET_LIVE_MODE'; enabled: boolean; provider?: string; targetLang?: string }
+  | {
+      type: 'START_TRANSLATE'
+      payload: TranscriptPayload
+      request: TranslateRequest
+    }
+  | { type: 'CANCEL_TRANSLATE' }
   | { type: 'PING_OVERLAY' }
 
 export type ExtractTranscriptResponse =

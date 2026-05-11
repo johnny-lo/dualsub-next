@@ -37,6 +37,7 @@ interface AutoTranslateConfig {
 }
 let autoTranslateConfig: AutoTranslateConfig | null = null
 let autoTranslateAbort: (() => void) | null = null
+let fullTranslateAbort: (() => void) | null = null
 
 // ─── persistent overlay cache ───────────────────────────────────────────
 // Translations are stored per videoKey in chrome.storage.local so that
@@ -120,11 +121,50 @@ function stopAll(opts?: { forNavigation?: boolean }) {
   inflightLive.clear()
   autoTranslateAbort?.()
   autoTranslateAbort = null
+  fullTranslateAbort?.()
+  fullTranslateAbort = null
   if (!opts?.forNavigation) {
     liveMode = false
     autoTranslateConfig = null
     void chrome.storage.local.remove(AUTO_TRANSLATE_KEY)
   }
+}
+
+function startFullTranscriptTranslate(
+  videoKey: string,
+  entries: Array<{ index: number; originalText: string }>,
+  request: Parameters<DaemonClient['translate']>[0],
+) {
+  currentVideoKey = videoKey
+  ensureOverlay().setTranslations({})
+  startCueObserver()
+
+  const byIndex = new Map<number, string>()
+  for (const e of entries) byIndex.set(e.index, e.originalText)
+
+  fullTranslateAbort?.()
+  fullTranslateAbort = daemon.translate(request, {
+    onChunkDone: (ck) => {
+      if (!overlay || currentVideoKey !== videoKey) return
+      const map: Record<string, string> = {}
+      for (const l of ck.lines) {
+        const orig = byIndex.get(l.index)
+        if (orig) map[orig] = l.text
+      }
+      if (Object.keys(map).length > 0) {
+        overlay.patchTranslations(map)
+        void writeStoredTranslations(videoKey, map, 'merge')
+      }
+    },
+    onDone: () => {
+      if (currentVideoKey === videoKey) fullTranslateAbort = null
+      console.log(`[DualSub] full translate done for ${videoKey}`)
+    },
+    onFatal: (err) => {
+      if (currentVideoKey === videoKey) fullTranslateAbort = null
+      console.warn(`[DualSub] full translate failed for ${videoKey}:`, err.message)
+    },
+  })
 }
 
 async function autoTranslateCurrentLecture(): Promise<void> {
@@ -149,42 +189,36 @@ async function autoTranslateCurrentLecture(): Promise<void> {
   ensureOverlay().setTranslations({})
   startCueObserver()
 
-  const byIndex = new Map<number, string>()
-  for (const e of entries) byIndex.set(e.index, e.originalText)
-
   autoTranslateAbort?.()
-  autoTranslateAbort = daemon.translate(
-    {
-      site: extractor.site,
-      video_key: videoKey,
-      title: extractor.title(),
-      provider: autoTranslateConfig.provider,
-      source_lang: autoTranslateConfig.sourceLang,
-      target_lang: autoTranslateConfig.targetLang,
-      lines: entries.map((e) => ({ index: e.index, text: e.originalText })),
+  autoTranslateAbort = daemon.translate({
+    site: extractor.site,
+    video_key: videoKey,
+    title: extractor.title(),
+    provider: autoTranslateConfig.provider,
+    source_lang: autoTranslateConfig.sourceLang,
+    target_lang: autoTranslateConfig.targetLang,
+    lines: entries.map((e) => ({ index: e.index, text: e.originalText })),
+  }, {
+    onChunkDone: (ck) => {
+      if (!overlay || currentVideoKey !== videoKey) return
+      const map: Record<string, string> = {}
+      const byIndex = new Map(entries.map((e) => [e.index, e.originalText]))
+      for (const l of ck.lines) {
+        const orig = byIndex.get(l.index)
+        if (orig) map[orig] = l.text
+      }
+      if (Object.keys(map).length > 0) {
+        overlay.patchTranslations(map)
+        void writeStoredTranslations(videoKey, map, 'merge')
+      }
     },
-    {
-      onChunkDone: (ck) => {
-        // Race guard: another navigation may have happened mid-stream.
-        if (!overlay || currentVideoKey !== videoKey) return
-        const map: Record<string, string> = {}
-        for (const l of ck.lines) {
-          const orig = byIndex.get(l.index)
-          if (orig) map[orig] = l.text
-        }
-        if (Object.keys(map).length > 0) {
-          overlay.patchTranslations(map)
-          void writeStoredTranslations(videoKey, map, 'merge')
-        }
-      },
-      onDone: () => {
-        console.log(`[DualSub] auto-translate done for ${videoKey}`)
-      },
-      onFatal: (err) => {
-        console.warn(`[DualSub] auto-translate failed for ${videoKey}:`, err.message)
-      },
+    onDone: () => {
+      console.log(`[DualSub] auto-translate done for ${videoKey}`)
     },
-  )
+    onFatal: (err) => {
+      console.warn(`[DualSub] auto-translate failed for ${videoKey}:`, err.message)
+    },
+  })
 }
 
 function handleCue(cue: ActiveCue | null) {
@@ -307,6 +341,19 @@ chrome.runtime.onMessage.addListener(
         ensureOverlay()
         startCueObserver()
       }
+      sendResponse({ ok: true } satisfies SimpleAck)
+      return false
+    }
+
+    if (msg.type === 'START_TRANSLATE') {
+      startFullTranscriptTranslate(msg.payload.videoKey, msg.payload.entries, msg.request)
+      sendResponse({ ok: true } satisfies SimpleAck)
+      return false
+    }
+
+    if (msg.type === 'CANCEL_TRANSLATE') {
+      fullTranslateAbort?.()
+      fullTranslateAbort = null
       sendResponse({ ok: true } satisfies SimpleAck)
       return false
     }
