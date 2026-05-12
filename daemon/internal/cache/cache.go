@@ -347,3 +347,8 @@ func (c *Cache) Clear(ctx context.Context) error {
 	_, err := c.db.ExecContext(ctx, `DELETE FROM translations; DELETE FROM transcripts; DELETE FROM jobs;`)
 	return err
 }
+
+func (c *Cache) ClearJobs(ctx context.Context) error {
+	_, err := c.db.ExecContext(ctx, `DELETE FROM jobs;`)
+	return err
+}

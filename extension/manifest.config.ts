@@ -6,9 +6,21 @@ export default defineManifest({
   name: 'DualSub Next',
   version: pkg.version,
   description: 'Bilingual subtitles for Netflix and Udemy, powered by a local Go daemon.',
+  icons: {
+    16: 'icons/icon-16.png',
+    32: 'icons/icon-32.png',
+    48: 'icons/icon-48.png',
+    128: 'icons/icon-128.png',
+  },
   action: {
     default_popup: 'src/popup/index.html',
     default_title: 'DualSub Next',
+    default_icon: {
+      16: 'icons/icon-16.png',
+      32: 'icons/icon-32.png',
+      48: 'icons/icon-48.png',
+      128: 'icons/icon-128.png',
+    },
   },
   options_page: 'src/options/index.html',
   background: {

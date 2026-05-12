@@ -249,6 +249,51 @@ func TestJobsListing(t *testing.T) {
 	}
 }
 
+func TestJobsDeleteClearsOnlyJobs(t *testing.T) {
+	ctx := newTestServer(t)
+	defer ctx.ts.Close()
+
+	if err := ctx.cache.StoreTranslations(context.Background(), []cache.TranslationEntry{{
+		Key: "k1", Provider: "mock", Model: "mock-model", SourceLang: "en", TargetLang: "zh-TW",
+		OriginalText: "Hello", TranslatedText: "[t]Hello",
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := ctx.cache.SaveTranscript(context.Background(), cache.Transcript{
+		VideoKey: "vid-A", Site: "test", Title: "A", RawJSON: "[]",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := ctx.cache.CreateJob(context.Background(), cache.Job{
+		ID: "job-A", VideoKey: "vid-A", Provider: "mock", Model: "mock-model",
+		Status: "running", TotalChunks: 2,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	req, err := http.NewRequest(http.MethodDelete, ctx.ts.URL+"/v1/jobs", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(res.Body)
+		t.Fatalf("status %d: %s", res.StatusCode, b)
+	}
+
+	stats, err := ctx.cache.Stats(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats.Jobs != 0 || stats.Translations != 1 || stats.Transcripts != 1 {
+		t.Fatalf("unexpected stats after delete: %+v", stats)
+	}
+}
+
 func TestConfigGetPut(t *testing.T) {
 	ctx := newTestServer(t)
 	defer ctx.ts.Close()

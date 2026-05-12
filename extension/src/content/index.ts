@@ -8,6 +8,7 @@ import type {
   ExtractTranscriptResponse,
   OverlayStatus,
   SimpleAck,
+  TranslateStatus,
 } from '@/shared/messaging'
 
 const extractor = detectSite()
@@ -38,6 +39,7 @@ interface AutoTranslateConfig {
 let autoTranslateConfig: AutoTranslateConfig | null = null
 let autoTranslateAbort: (() => void) | null = null
 let fullTranslateAbort: (() => void) | null = null
+let fullTranslateStatus: TranslateStatus = { ok: true, active: false, status: 'idle' }
 
 // ─── persistent overlay cache ───────────────────────────────────────────
 // Translations are stored per videoKey in chrome.storage.local so that
@@ -123,11 +125,50 @@ function stopAll(opts?: { forNavigation?: boolean }) {
   autoTranslateAbort = null
   fullTranslateAbort?.()
   fullTranslateAbort = null
+  if (fullTranslateStatus.active && fullTranslateStatus.status === 'running') {
+    fullTranslateStatus = {
+      ...fullTranslateStatus,
+      status: 'aborted',
+      updatedAt: Date.now(),
+    }
+  }
   if (!opts?.forNavigation) {
     liveMode = false
     autoTranslateConfig = null
     void chrome.storage.local.remove(AUTO_TRANSLATE_KEY)
   }
+}
+
+function setFullTranslateStatus(patch: Partial<Extract<TranslateStatus, { active: true }>>) {
+  if (!fullTranslateStatus.active) return
+  fullTranslateStatus = {
+    ...fullTranslateStatus,
+    ...patch,
+    updatedAt: Date.now(),
+  }
+}
+
+function isCurrentFullTranslate(videoKey: string): boolean {
+  return fullTranslateStatus.active && fullTranslateStatus.videoKey === videoKey
+}
+
+function hideOverlayOnly() {
+  cueDisposer?.()
+  cueDisposer = null
+  overlay?.destroy()
+  overlay = null
+  currentVideoKey = null
+  inflightLive.clear()
+}
+
+async function showOverlayForCurrentVideo(): Promise<SimpleAck> {
+  if (!extractor) return { ok: false, message: 'unsupported site' }
+  const videoKey = extractor.videoKey()
+  const stored = await readStoredTranslations(videoKey)
+  currentVideoKey = videoKey
+  ensureOverlay().setTranslations(stored ?? {})
+  startCueObserver()
+  return { ok: true }
 }
 
 function startFullTranscriptTranslate(
@@ -138,30 +179,92 @@ function startFullTranscriptTranslate(
   currentVideoKey = videoKey
   ensureOverlay().setTranslations({})
   startCueObserver()
+  fullTranslateStatus = {
+    ok: true,
+    active: true,
+    jobId: null,
+    videoKey,
+    provider: request.provider,
+    status: 'running',
+    totalChunks: 0,
+    completedChunks: 0,
+    failedChunks: 0,
+    totalLines: entries.length,
+    translatedLines: 0,
+    cacheHits: 0,
+    startedAt: Date.now(),
+    updatedAt: Date.now(),
+  }
 
   const byIndex = new Map<number, string>()
   for (const e of entries) byIndex.set(e.index, e.originalText)
 
   fullTranslateAbort?.()
   fullTranslateAbort = daemon.translate(request, {
+    onJobCreated: (info) => {
+      if (!isCurrentFullTranslate(videoKey)) return
+      setFullTranslateStatus({
+        jobId: info.job_id,
+        totalChunks: info.total_chunks,
+        totalLines: info.total_lines,
+        cacheHits: info.cache_hits,
+      })
+    },
     onChunkDone: (ck) => {
-      if (!overlay || currentVideoKey !== videoKey) return
+      if (!isCurrentFullTranslate(videoKey)) return
       const map: Record<string, string> = {}
       for (const l of ck.lines) {
         const orig = byIndex.get(l.index)
         if (orig) map[orig] = l.text
       }
       if (Object.keys(map).length > 0) {
-        overlay.patchTranslations(map)
+        if (overlay && currentVideoKey === videoKey) overlay.patchTranslations(map)
         void writeStoredTranslations(videoKey, map, 'merge')
       }
+      setFullTranslateStatus({
+        completedChunks:
+          ck.source === 'llm' && fullTranslateStatus.active
+            ? fullTranslateStatus.completedChunks + 1
+            : fullTranslateStatus.active
+              ? fullTranslateStatus.completedChunks
+              : 0,
+        translatedLines: fullTranslateStatus.active
+          ? fullTranslateStatus.translatedLines + ck.lines.length
+          : ck.lines.length,
+      })
     },
-    onDone: () => {
+    onChunkError: (err) => {
+      if (!isCurrentFullTranslate(videoKey)) return
+      if (!err.final) return
+      setFullTranslateStatus({
+        failedChunks: fullTranslateStatus.active
+          ? fullTranslateStatus.failedChunks + 1
+          : 1,
+        errorSummary: `${err.code}: ${err.message}`,
+      })
+    },
+    onDone: (done) => {
+      if (!isCurrentFullTranslate(videoKey)) return
       if (currentVideoKey === videoKey) fullTranslateAbort = null
+      setFullTranslateStatus({
+        status: done.failed > 0 && done.completed > 0
+          ? 'partial'
+          : done.failed > 0
+            ? 'failed'
+            : 'completed',
+        completedChunks: done.completed,
+        failedChunks: done.failed,
+        cacheHits: done.cache_hits,
+      })
       console.log(`[DualSub] full translate done for ${videoKey}`)
     },
     onFatal: (err) => {
+      if (!isCurrentFullTranslate(videoKey)) return
       if (currentVideoKey === videoKey) fullTranslateAbort = null
+      setFullTranslateStatus({
+        status: 'failed',
+        errorSummary: err.message,
+      })
       console.warn(`[DualSub] full translate failed for ${videoKey}:`, err.message)
     },
   })
@@ -200,7 +303,6 @@ async function autoTranslateCurrentLecture(): Promise<void> {
     lines: entries.map((e) => ({ index: e.index, text: e.originalText })),
   }, {
     onChunkDone: (ck) => {
-      if (!overlay || currentVideoKey !== videoKey) return
       const map: Record<string, string> = {}
       const byIndex = new Map(entries.map((e) => [e.index, e.originalText]))
       for (const l of ck.lines) {
@@ -208,7 +310,7 @@ async function autoTranslateCurrentLecture(): Promise<void> {
         if (orig) map[orig] = l.text
       }
       if (Object.keys(map).length > 0) {
-        overlay.patchTranslations(map)
+        if (overlay && currentVideoKey === videoKey) overlay.patchTranslations(map)
         void writeStoredTranslations(videoKey, map, 'merge')
       }
     },
@@ -329,6 +431,17 @@ chrome.runtime.onMessage.addListener(
       return false
     }
 
+    if (msg.type === 'HIDE_OVERLAY') {
+      hideOverlayOnly()
+      sendResponse({ ok: true } satisfies SimpleAck)
+      return false
+    }
+
+    if (msg.type === 'SHOW_OVERLAY') {
+      showOverlayForCurrentVideo().then(sendResponse)
+      return true
+    }
+
     if (msg.type === 'SET_LIVE_MODE') {
       if (!extractor) {
         sendResponse({ ok: false, message: 'unsupported site' } satisfies SimpleAck)
@@ -354,7 +467,13 @@ chrome.runtime.onMessage.addListener(
     if (msg.type === 'CANCEL_TRANSLATE') {
       fullTranslateAbort?.()
       fullTranslateAbort = null
+      setFullTranslateStatus({ status: 'aborted' })
       sendResponse({ ok: true } satisfies SimpleAck)
+      return false
+    }
+
+    if (msg.type === 'GET_TRANSLATE_STATUS') {
+      sendResponse(fullTranslateStatus)
       return false
     }
 
@@ -363,7 +482,7 @@ chrome.runtime.onMessage.addListener(
         ok: true,
         mounted: overlay !== null,
         liveMode,
-        videoKey: currentVideoKey,
+        videoKey: currentVideoKey ?? extractor?.videoKey() ?? null,
         translationsCount: overlay?.translationsCount ?? 0,
       } satisfies OverlayStatus)
       return false

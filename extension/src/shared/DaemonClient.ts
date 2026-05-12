@@ -110,6 +110,14 @@ export class DaemonClient {
     return res.json()
   }
 
+  async clearJobs(): Promise<void> {
+    const res = await fetch(`${this.baseURL}/v1/jobs`, { method: 'DELETE' })
+    if (!res.ok) {
+      const text = await res.text().catch(() => '')
+      throw new Error(`HTTP ${res.status}: ${text}`)
+    }
+  }
+
   async getConfig(): Promise<DaemonConfig> {
     const res = await fetch(`${this.baseURL}/v1/config`)
     if (!res.ok) throw new Error(`HTTP ${res.status}`)

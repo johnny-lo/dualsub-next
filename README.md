@@ -61,7 +61,9 @@ In Chrome, open `chrome://extensions/`, enable Developer Mode, click
 5. Toggle **Live mode** to translate cues on the fly without a full pass.
 6. Drag the bilingual overlay to reposition it; the overlay stays anchored by
    its center point as subtitle line length changes.
-7. **Extract & Copy** copies the original transcript to the clipboard as a
+7. Use **Clear** in Recent Jobs to clear job history without deleting cached
+   translations.
+8. **Extract & Copy** copies the original transcript to the clipboard as a
    fallback for pasting into a web LLM.
 
 ## Development
@@ -87,6 +89,7 @@ cd extension && npm run build
 | GET    | `/v1/providers`      | list configured providers                      |
 | POST   | `/v1/translate`      | streams chunked translation as SSE             |
 | GET    | `/v1/jobs?limit=N`   | recent jobs (most recent first)                |
+| DELETE | `/v1/jobs`           | clear job history only; keeps translation cache |
 | GET    | `/v1/config`         | current daemon config                          |
 | PUT    | `/v1/config`         | persist config to TOML (restart to apply)      |
 

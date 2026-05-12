@@ -1,21 +1,25 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useState, type CSSProperties } from 'react'
 import {
   Alert,
   Button,
   Collapse,
   ConfigProvider,
-  Divider,
   Input,
+  Popconfirm,
   Progress,
   Select,
   Space,
   Switch,
   Tag,
+  Tooltip,
   Typography,
 } from 'antd'
 import {
   CheckOutlined,
   CopyOutlined,
+  DeleteOutlined,
+  EyeOutlined,
+  EyeInvisibleOutlined,
   ReloadOutlined,
   SettingOutlined,
   StopOutlined,
@@ -32,13 +36,13 @@ import {
   type ExtractTranscriptResponse,
   type OverlayStatus,
   type SimpleAck,
+  type TranslateStatus,
 } from '@/shared/messaging'
 import {
   DaemonClient,
   type ChunkErrorPayload,
   type JobSummary,
   type ProviderInfo,
-  type TranslatedLine,
 } from '@/shared/DaemonClient'
 
 const TARGET_LANG = '繁體中文'
@@ -59,12 +63,14 @@ type TranslateJob = {
   status: 'extracting' | 'running' | 'done' | 'aborted'
   totalChunks: number
   completedChunks: number
+  failedChunks: number
   cacheHits: number
   totalLines: number
+  translatedLineCount: number
   errors: ChunkErrorPayload[]
-  translated: TranslatedLine[]
-  startedAt?: number
   fatal?: string
+  videoKey?: string
+  provider?: string
   source?: TranscriptPayload
 }
 
@@ -73,6 +79,26 @@ const client = new DaemonClient()
 // Path to the dualsub-next repo on this machine. Edit if you move the repo.
 const DAEMON_DIR_WINDOWS = 'c:\\Users\\j4503\\repos\\dualsub-next'
 
+const panelStyle: CSSProperties = {
+  border: '1px solid #e5e7eb',
+  borderRadius: 8,
+  padding: 12,
+  background: '#fff',
+}
+
+const mutedPanelStyle: CSSProperties = {
+  ...panelStyle,
+  background: '#f8fafc',
+}
+
+const sectionTitleStyle: CSSProperties = {
+  display: 'flex',
+  alignItems: 'center',
+  justifyContent: 'space-between',
+  gap: 8,
+  marginBottom: 8,
+}
+
 function detectStartCommand(): string {
   const ua = navigator.userAgent
   const uaPlatform = (navigator as { userAgentData?: { platform?: string } }).userAgentData?.platform ?? ''
@@ -80,8 +106,40 @@ function detectStartCommand(): string {
   if (isWindows) {
     return `cd '${DAEMON_DIR_WINDOWS}'; .\\dualsub-watch.ps1`
   }
-  // Linux/macOS — path unknown to extension; user runs from their repo root.
   return './dualsub-watch.sh'
+}
+
+function compactVideoKey(videoKey?: string | null): string {
+  if (!videoKey) return 'No current video'
+  return videoKey.replace(/^udemy:/, 'Udemy · ').replace(/^netflix:/, 'Netflix · ')
+}
+
+function jobFromTranslateStatus(status: TranslateStatus): TranslateJob | null {
+  if (!status.active) return null
+  const terminal = status.status === 'completed' || status.status === 'partial' || status.status === 'failed'
+  const error = status.errorSummary
+    ? [{
+        chunk: 0,
+        code: status.status.toUpperCase(),
+        message: status.errorSummary,
+        retryable: false,
+        attempt: 1,
+        final: true,
+      }]
+    : []
+  return {
+    status: status.status === 'aborted' ? 'aborted' : terminal ? 'done' : 'running',
+    totalChunks: status.totalChunks,
+    completedChunks: status.completedChunks,
+    failedChunks: status.failedChunks,
+    cacheHits: status.cacheHits,
+    totalLines: status.totalLines,
+    translatedLineCount: status.translatedLines,
+    errors: error,
+    fatal: status.status === 'failed' ? status.errorSummary : undefined,
+    videoKey: status.videoKey,
+    provider: status.provider,
+  }
 }
 
 export default function App() {
@@ -92,24 +150,45 @@ export default function App() {
   const [liveMode, setLiveMode] = useState(false)
 
   const [overlayStatus, setOverlayStatus] = useState<OverlayStatus | null>(null)
+  const [translateStatus, setTranslateStatus] = useState<TranslateStatus | null>(null)
 
   const [extract, setExtract] = useState<ExtractState>({ state: 'idle' })
   const [job, setJob] = useState<TranslateJob | null>(null)
   const [recentJobs, setRecentJobs] = useState<JobSummary[]>([])
+  const [pasteText, setPasteText] = useState('')
+  const [pasteResult, setPasteResult] = useState<{ ok: boolean; message: string } | null>(null)
   const startCommand = useMemo(() => detectStartCommand(), [])
   const [copiedStart, setCopiedStart] = useState(false)
-  const onCopyStartCommand = async () => {
-    try {
-      await navigator.clipboard.writeText(startCommand)
-      setCopiedStart(true)
-      setTimeout(() => setCopiedStart(false), 1500)
-    } catch (err) {
-      console.error('[DualSub] clipboard write failed:', err)
-    }
-  }
 
   const refreshRecentJobs = async () => {
     setRecentJobs(await client.listJobs(5))
+  }
+
+  const refreshTranslateStatus = async () => {
+    try {
+      const status = await sendToActiveTab<TranslateStatus>({
+        type: 'GET_TRANSLATE_STATUS',
+      } satisfies ContentMessage)
+      setTranslateStatus(status)
+      const restored = jobFromTranslateStatus(status)
+      if (restored) setJob(restored)
+    } catch {
+      setTranslateStatus(null)
+    }
+  }
+
+  const refreshOverlayStatus = async () => {
+    try {
+      const status = await sendToActiveTab<OverlayStatus>({
+        type: 'PING_OVERLAY',
+      } satisfies ContentMessage)
+      if (status?.ok) {
+        setOverlayStatus(status)
+        setLiveMode(status.liveMode)
+      }
+    } catch {
+      setOverlayStatus(null)
+    }
   }
 
   const refreshDaemon = async () => {
@@ -125,75 +204,38 @@ export default function App() {
       } catch (err) {
         setProviderLoadError((err as Error).message)
       }
-      try {
-        await refreshRecentJobs()
-      } catch {
-        // ignore — non-essential
-      }
+      await refreshRecentJobs().catch(() => {})
     } catch (err) {
       setDaemon({ state: 'offline', error: (err as Error).message })
-    }
-  }
-
-  const refreshOverlayStatus = async () => {
-    try {
-      const status = await sendToActiveTab<OverlayStatus>({
-        type: 'PING_OVERLAY',
-      } satisfies ContentMessage)
-      if (status?.ok) setOverlayStatus(status)
-    } catch {
-      setOverlayStatus(null)
     }
   }
 
   useEffect(() => {
     void refreshDaemon()
     void refreshOverlayStatus()
+    void refreshTranslateStatus()
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
   useEffect(() => {
-    if (daemon.state !== 'connected') return
     const id = window.setInterval(() => {
-      void refreshRecentJobs().catch(() => {})
+      if (daemon.state === 'connected') void refreshRecentJobs().catch(() => {})
       void refreshOverlayStatus()
+      void refreshTranslateStatus()
     }, 2500)
     return () => window.clearInterval(id)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [daemon.state])
 
-  useEffect(() => {
-    if (!job?.source) return
-    const match = recentJobs.find(
-      (j) =>
-        j.video_key === job.source?.videoKey &&
-        j.provider === chosen &&
-        (!job.startedAt || j.created_at >= job.startedAt - 2),
-    )
-    if (!match) return
-    setJob((j) => {
-      if (!j) return j
-      const hasError = Boolean(match.error_summary)
-      return {
-        ...j,
-        status: match.status === 'running' ? 'running' : 'done',
-        totalChunks: match.total_chunks,
-        completedChunks: match.completed_chunks,
-        errors: hasError && j.errors.length === 0
-          ? [{
-              chunk: 0,
-              code: match.status.toUpperCase(),
-              message: match.error_summary,
-              retryable: false,
-              attempt: 1,
-              final: true,
-            }]
-          : j.errors,
-      }
-    })
-  }, [chosen, job?.source, recentJobs])
-
-  // ─── one-click extract original (fallback) ───────────────────────────────
+  const onCopyStartCommand = async () => {
+    try {
+      await navigator.clipboard.writeText(startCommand)
+      setCopiedStart(true)
+      setTimeout(() => setCopiedStart(false), 1500)
+    } catch (err) {
+      console.error('[DualSub] clipboard write failed:', err)
+    }
+  }
 
   const onExtract = async () => {
     setExtract({ state: 'working' })
@@ -219,11 +261,6 @@ export default function App() {
     }
   }
 
-  // ─── paste-back translated text ─────────────────────────────────────────
-
-  const [pasteText, setPasteText] = useState('')
-  const [pasteResult, setPasteResult] = useState<{ ok: boolean; message: string } | null>(null)
-
   const onApplyPasted = async () => {
     if (!pasteText.trim()) return
     const parsed = parseTranslatedTranscript(pasteText)
@@ -231,7 +268,6 @@ export default function App() {
       setPasteResult({ ok: false, message: 'No [index] lines found. Use [1] text format.' })
       return
     }
-    // We need the source payload to map index → original text
     const sourcePayload = extract.state === 'copied' ? extract.payload : job?.source
     if (!sourcePayload) {
       setPasteResult({ ok: false, message: 'Extract subtitles first so we can match indices.' })
@@ -257,18 +293,18 @@ export default function App() {
     }
   }
 
-  // ─── translate via daemon ────────────────────────────────────────────────
-
   const onTranslate = async () => {
     if (!chosen) return
     setJob({
       status: 'extracting',
       totalChunks: 0,
       completedChunks: 0,
+      failedChunks: 0,
       cacheHits: 0,
       totalLines: 0,
+      translatedLineCount: 0,
       errors: [],
-      translated: [],
+      provider: chosen,
     })
 
     let payload: TranscriptPayload
@@ -287,10 +323,6 @@ export default function App() {
       return
     }
 
-    // Mount overlay with empty translations so cues start showing originals
-    // immediately; chunks will patch in translations as they arrive. Also
-    // register autoTranslate config so the content script keeps translating
-    // subsequent Udemy lectures without the user clicking again.
     try {
       await sendToActiveTab<SimpleAck>({
         type: 'SET_OVERLAY',
@@ -303,16 +335,16 @@ export default function App() {
         },
       } satisfies ContentMessage)
     } catch {
-      // overlay is best-effort; don't abort the translate
+      // Overlay is best-effort; still try to start the translation.
     }
 
     setJob((j) =>
       j && {
         ...j,
         source: payload,
+        videoKey: payload.videoKey,
         status: 'running',
         totalLines: payload.entries.length,
-        startedAt: Math.floor(Date.now() / 1000),
       },
     )
 
@@ -330,7 +362,8 @@ export default function App() {
           lines: payload.entries.map((e) => ({ index: e.index, text: e.originalText })),
         },
       } satisfies ContentMessage)
-      void refreshRecentJobs().catch(() => {})
+      await refreshTranslateStatus().catch(() => {})
+      await refreshRecentJobs().catch(() => {})
     } catch (err) {
       setJob((j) => j && { ...j, status: 'done', fatal: (err as Error).message })
     }
@@ -341,12 +374,20 @@ export default function App() {
     setJob((j) => j && { ...j, status: 'aborted' })
   }
 
-  const onClearOverlay = async () => {
+  const onToggleOverlay = async () => {
     try {
-      await sendToActiveTab<SimpleAck>({ type: 'CLEAR_OVERLAY' } satisfies ContentMessage)
+      await sendToActiveTab<SimpleAck>({
+        type: overlayStatus?.mounted ? 'HIDE_OVERLAY' : 'SHOW_OVERLAY',
+      } satisfies ContentMessage)
+      void refreshOverlayStatus()
     } catch {
       // ignore
     }
+  }
+
+  const onClearJobs = async () => {
+    await client.clearJobs()
+    setRecentJobs([])
   }
 
   const onLiveModeToggle = async (enabled: boolean) => {
@@ -359,321 +400,359 @@ export default function App() {
         provider: chosen,
         targetLang: TARGET_LANG,
       } satisfies ContentMessage)
+      void refreshOverlayStatus()
     } catch {
       setLiveMode(!enabled)
     }
   }
 
-  const onCopyTranslated = async () => {
-    if (!job) return
-    const sorted = [...job.translated].sort((a, b) => a.index - b.index)
-    const text = sorted.map((l) => `[${l.index}] ${l.text}`).join('\n')
-    await navigator.clipboard.writeText(text)
-  }
-
-  const translatedLineCount = useMemo(() => {
+  const progressPct = useMemo(() => {
     if (!job) return 0
-    return new Set(job.translated.map((line) => line.index)).size
+    if (job.status === 'done') return 100
+    if (job.totalChunks > 0) {
+      return Math.min(100, Math.round((job.completedChunks / job.totalChunks) * 100))
+    }
+    if (job.totalLines > 0) {
+      return Math.min(100, Math.round((job.translatedLineCount / job.totalLines) * 100))
+    }
+    return 0
   }, [job])
 
-  const progressPct = useMemo(() => {
-    if (!job || job.totalLines === 0) return 0
-    return Math.min(100, Math.round((translatedLineCount / job.totalLines) * 100))
-  }, [job, translatedLineCount])
+  const currentPageLabel = compactVideoKey(overlayStatus?.videoKey ?? job?.videoKey)
+  const activeJob = job?.status === 'running' || job?.status === 'extracting'
+  const recentNeedsAttention = recentJobs.some((j) => j.status === 'running' || j.status === 'failed' || j.status === 'partial')
+  const recentDefaultKey = recentNeedsAttention ? ['jobs'] : []
 
   return (
     <ConfigProvider>
-      <div style={{ width: 380, padding: 16 }}>
-        <Typography.Title level={5} style={{ marginTop: 0 }}>
-          DualSub Next
-        </Typography.Title>
-
-        {/* Daemon status */}
-        <Space direction="vertical" size="small" style={{ width: '100%' }}>
-          <Space style={{ width: '100%', justifyContent: 'space-between' }}>
-            <Space>
-              <span>Daemon:</span>
-              {daemon.state === 'checking' && <Tag color="blue">checking…</Tag>}
-              {daemon.state === 'connected' && <Tag color="green">connected</Tag>}
-              {daemon.state === 'offline' && <Tag color="red">offline</Tag>}
-              <Button
-                icon={<ReloadOutlined />}
-                onClick={refreshDaemon}
-                size="small"
-                type="text"
-                title="Refresh"
-              />
-            </Space>
-            <Button
-              icon={<SettingOutlined />}
-              onClick={() => chrome.runtime.openOptionsPage()}
-              size="small"
-              type="text"
-              title="Open settings"
-            >
-              Settings
-            </Button>
-          </Space>
-          {daemon.state === 'offline' && (
-            <Space direction="vertical" size={4} style={{ width: '100%' }}>
-              <Typography.Text type="danger" style={{ fontSize: 12 }}>
-                {daemon.error}
-              </Typography.Text>
-              <Typography.Text type="secondary" style={{ fontSize: 11 }}>
-                Run this in a terminal to start the daemon:
-              </Typography.Text>
-              <Space.Compact style={{ width: '100%' }}>
-                <Input
-                  readOnly
-                  size="small"
-                  value={startCommand}
-                  style={{ fontFamily: 'monospace', fontSize: 11 }}
-                />
-                <Button
-                  size="small"
-                  icon={<CopyOutlined />}
-                  onClick={onCopyStartCommand}
-                  title="Copy command"
-                />
-              </Space.Compact>
-              {copiedStart && (
-                <Typography.Text type="success" style={{ fontSize: 11 }}>
-                  Copied — paste into a terminal and press Enter.
-                </Typography.Text>
+      <div style={{ width: 392, padding: 14, background: '#f6f8fb' }}>
+        <div style={{ ...sectionTitleStyle, marginBottom: 12 }}>
+          <div>
+            <Typography.Title level={5} style={{ margin: 0 }}>
+              DualSub Next
+            </Typography.Title>
+            <Space size={6} style={{ marginTop: 4 }}>
+              <StatusTag daemon={daemon} />
+              {translateStatus?.active && translateStatus.status === 'running' && (
+                <Tag color="processing">Translating</Tag>
               )}
             </Space>
-          )}
-        </Space>
-
-        {/* Current video translation status */}
-        <div style={{ marginTop: 10, padding: '6px 10px', background: '#f5f5f5', borderRadius: 4 }}>
-          <Space size="small">
-            <span style={{ fontSize: 12 }}>Current video:</span>
-            {overlayStatus === null ? (
-              <Tag color="default">no subtitle page</Tag>
-            ) : overlayStatus.translationsCount > 0 ? (
-              <Tag color="green">translated ({overlayStatus.translationsCount} lines)</Tag>
-            ) : overlayStatus.mounted ? (
-              <Tag color="orange">overlay active, no translations</Tag>
-            ) : (
-              <Tag color="default">not translated</Tag>
-            )}
-            {overlayStatus?.liveMode && <Tag color="blue">Live</Tag>}
+          </div>
+          <Space size={4}>
+            <Tooltip title="Refresh">
+              <Button icon={<ReloadOutlined />} onClick={refreshDaemon} size="small" type="text" />
+            </Tooltip>
+            <Tooltip title="Settings">
+              <Button
+                icon={<SettingOutlined />}
+                onClick={() => chrome.runtime.openOptionsPage()}
+                size="small"
+                type="text"
+              />
+            </Tooltip>
           </Space>
         </div>
 
-        <Divider style={{ margin: '14px 0 10px' }} />
-
-        {/* Translate */}
-        <Typography.Text strong>Translate full transcript</Typography.Text>
-        <div style={{ marginTop: 8 }}>
-          <Space.Compact style={{ width: '100%' }}>
-            <Select
-              value={chosen}
-              onChange={setChosen}
-              disabled={providers.length === 0}
-              style={{ width: 130 }}
-              placeholder="Provider"
-              options={providers.map((p) => ({ value: p.name, label: p.name }))}
-            />
-            <Button
-              type="primary"
-              icon={<TranslationOutlined />}
-              onClick={onTranslate}
-              disabled={
-                daemon.state !== 'connected' ||
-                providers.length === 0 ||
-                job?.status === 'running' ||
-                job?.status === 'extracting'
-              }
-              block
-            >
-              Translate
-            </Button>
-          </Space.Compact>
-          {providerLoadError && (
-            <Typography.Text type="danger" style={{ fontSize: 12 }}>
-              providers: {providerLoadError}
-            </Typography.Text>
-          )}
-          {providers.length === 0 && daemon.state === 'connected' && !providerLoadError && (
-            <Typography.Text type="warning" style={{ fontSize: 12 }}>
-              No providers configured. Open Options to set up.
-            </Typography.Text>
-          )}
-        </div>
-
-        {job && (
-          <div style={{ marginTop: 10 }}>
-            {job.status === 'extracting' && (
-              <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-                Extracting transcript from page…
+        {daemon.state === 'offline' && (
+          <div style={{ ...panelStyle, marginBottom: 10 }}>
+            <Typography.Text strong>Daemon not reachable</Typography.Text>
+            <Typography.Paragraph type="secondary" style={{ fontSize: 12, margin: '4px 0 8px' }}>
+              Start the local daemon, then refresh.
+            </Typography.Paragraph>
+            <Space.Compact style={{ width: '100%' }}>
+              <Input
+                readOnly
+                size="small"
+                value={startCommand}
+                style={{ fontFamily: 'monospace', fontSize: 11 }}
+              />
+              <Button size="small" icon={<CopyOutlined />} onClick={onCopyStartCommand} />
+            </Space.Compact>
+            {copiedStart && (
+              <Typography.Text type="success" style={{ display: 'block', fontSize: 11, marginTop: 4 }}>
+                Copied.
               </Typography.Text>
             )}
-            {(job.status === 'running' || job.status === 'done' || job.status === 'aborted') && (
-              <>
-                <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12 }}>
-                  <span>
-                    {job.totalChunks > 0
-                      ? `${job.completedChunks}/${job.totalChunks} chunks`
-                      : 'cache only'}
-                    {job.cacheHits > 0 ? ` · ${job.cacheHits} cached` : ''}
-                  </span>
-                  <span>{translatedLineCount} / {job.totalLines} lines</span>
-                </div>
-                <Progress
-                  percent={progressPct}
-                  size="small"
-                  status={
-                    job.fatal
-                      ? 'exception'
-                      : job.status === 'done' && job.errors.length > 0
-                        ? 'exception'
-                        : job.status === 'done'
-                          ? 'success'
-                          : 'active'
-                  }
-                />
-              </>
-            )}
-            {job.status === 'running' && (
-              <Button onClick={onAbort} icon={<StopOutlined />} size="small" block>
-                Cancel
+          </div>
+        )}
+
+        <Space direction="vertical" size={10} style={{ width: '100%' }}>
+          <div style={mutedPanelStyle}>
+            <div style={sectionTitleStyle}>
+              <Typography.Text strong>Current Page</Typography.Text>
+              {overlayStatus?.liveMode && <Tag color="blue">Live</Tag>}
+            </div>
+            <Typography.Text
+              style={{
+                display: 'block',
+                maxWidth: '100%',
+                overflow: 'hidden',
+                textOverflow: 'ellipsis',
+                whiteSpace: 'nowrap',
+                fontSize: 12,
+              }}
+              title={currentPageLabel}
+            >
+              {currentPageLabel}
+            </Typography.Text>
+            <Space size={6} wrap style={{ marginTop: 8 }}>
+              {overlayStatus === null ? (
+                <Tag color="default">No subtitle page</Tag>
+              ) : overlayStatus.translationsCount > 0 ? (
+                <Tag color="green">Translated {overlayStatus.translationsCount} lines</Tag>
+              ) : overlayStatus.mounted ? (
+                <Tag color="orange">Overlay active</Tag>
+              ) : (
+                <Tag color="default">Not translated</Tag>
+              )}
+            </Space>
+          </div>
+
+          <div style={panelStyle}>
+            <div style={sectionTitleStyle}>
+              <Typography.Text strong>Translate Transcript</Typography.Text>
+              {job?.provider && <Typography.Text type="secondary" style={{ fontSize: 12 }}>{job.provider}</Typography.Text>}
+            </div>
+            <Space.Compact style={{ width: '100%' }}>
+              <Select
+                value={chosen}
+                onChange={setChosen}
+                disabled={providers.length === 0 || activeJob}
+                style={{ width: 122 }}
+                placeholder="Provider"
+                options={providers.map((p) => ({ value: p.name, label: p.name }))}
+              />
+              <Button
+                type="primary"
+                icon={<TranslationOutlined />}
+                onClick={onTranslate}
+                disabled={daemon.state !== 'connected' || providers.length === 0 || activeJob}
+                block
+              >
+                Translate
               </Button>
+            </Space.Compact>
+
+            {providerLoadError && (
+              <Typography.Text type="danger" style={{ display: 'block', fontSize: 12, marginTop: 6 }}>
+                providers: {providerLoadError}
+              </Typography.Text>
             )}
-            {job.fatal && (
-              <Alert type="error" showIcon message="Translate failed" description={job.fatal} />
+            {providers.length === 0 && daemon.state === 'connected' && !providerLoadError && (
+              <Typography.Text type="warning" style={{ display: 'block', fontSize: 12, marginTop: 6 }}>
+                No providers configured. Open Settings to set up.
+              </Typography.Text>
             )}
-            {job.errors.length > 0 && (
+
+            {job && (
+              <div style={{ marginTop: 10 }}>
+                {job.status === 'extracting' ? (
+                  <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                    Extracting transcript from page...
+                  </Typography.Text>
+                ) : (
+                  <>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8, fontSize: 12 }}>
+                      <Typography.Text type="secondary">
+                        {job.totalChunks > 0
+                          ? `${job.completedChunks}/${job.totalChunks} chunks`
+                          : 'Preparing chunks'}
+                        {job.failedChunks > 0 ? ` · ${job.failedChunks} failed` : ''}
+                        {job.cacheHits > 0 ? ` · ${job.cacheHits} cached` : ''}
+                      </Typography.Text>
+                      <Typography.Text type="secondary">
+                        {job.translatedLineCount}/{job.totalLines || 0} lines
+                      </Typography.Text>
+                    </div>
+                    <Progress
+                      percent={progressPct}
+                      size="small"
+                      status={
+                        job.fatal
+                          ? 'exception'
+                          : job.status === 'done' && job.errors.length > 0
+                            ? 'exception'
+                            : job.status === 'done'
+                              ? 'success'
+                              : 'active'
+                      }
+                    />
+                  </>
+                )}
+                {job.status === 'running' && (
+                  <Button onClick={onAbort} icon={<StopOutlined />} size="small" block>
+                    Cancel
+                  </Button>
+                )}
+                {job.fatal && (
+                  <Alert
+                    type="error"
+                    showIcon
+                    message="Translate failed"
+                    description={job.fatal}
+                    style={{ marginTop: 8 }}
+                  />
+                )}
+              </div>
+            )}
+          </div>
+
+          <div style={panelStyle}>
+            <div style={sectionTitleStyle}>
+              <Typography.Text strong>Quick Actions</Typography.Text>
+            </div>
+            <Space direction="vertical" size={8} style={{ width: '100%' }}>
+              <Space style={{ width: '100%', justifyContent: 'space-between' }}>
+                <Typography.Text>Live mode</Typography.Text>
+                <Switch
+                  checked={liveMode}
+                  onChange={onLiveModeToggle}
+                  disabled={daemon.state !== 'connected' || providers.length === 0}
+                />
+              </Space>
+              <Space.Compact style={{ width: '100%' }}>
+                <Button
+                  icon={overlayStatus?.mounted ? <EyeInvisibleOutlined /> : <EyeOutlined />}
+                  onClick={onToggleOverlay}
+                  disabled={overlayStatus === null}
+                  block
+                >
+                  {overlayStatus?.mounted ? 'Hide Overlay' : 'Show Overlay'}
+                </Button>
+                <Button
+                  icon={<CopyOutlined />}
+                  onClick={onExtract}
+                  loading={extract.state === 'working'}
+                  block
+                >
+                  Extract & Copy
+                </Button>
+              </Space.Compact>
+              {extract.state === 'copied' && (
+                <Alert type="success" showIcon message={`Copied ${extract.entries} lines`} />
+              )}
+              {extract.state === 'error' && (
+                <Alert type="error" showIcon message={extract.code} description={extract.message} />
+              )}
+            </Space>
+          </div>
+
+          <div style={panelStyle}>
+            <div style={sectionTitleStyle}>
+              <Typography.Text strong>Recent Jobs</Typography.Text>
+              <Popconfirm
+                title="Clear recent job history?"
+                description="Translations and transcript cache will be kept."
+                okText="Clear"
+                cancelText="Cancel"
+                onConfirm={onClearJobs}
+                disabled={recentJobs.length === 0}
+              >
+                <Button
+                  size="small"
+                  type="text"
+                  danger
+                  icon={<DeleteOutlined />}
+                  disabled={recentJobs.length === 0}
+                >
+                  Clear
+                </Button>
+              </Popconfirm>
+            </div>
+            {recentJobs.length === 0 ? (
+              <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                No recent jobs.
+              </Typography.Text>
+            ) : (
               <Collapse
                 size="small"
-                style={{ marginTop: 6 }}
+                ghost
+                defaultActiveKey={recentDefaultKey}
                 items={[
                   {
-                    key: 'errs',
-                    label: `${job.errors.length} chunk error(s)`,
-                    children: job.errors.map((e, i) => (
-                      <div key={i} style={{ fontSize: 11 }}>
-                        <Tag color="red">chunk {e.chunk}</Tag> <code>{e.code}</code>: {e.message}
+                    key: 'jobs',
+                    label: `${recentJobs.length} job${recentJobs.length === 1 ? '' : 's'}`,
+                    children: recentJobs.map((j) => (
+                      <div key={j.job_id} style={{ fontSize: 11, marginBottom: 6 }}>
+                        <Tag color={statusColor(j.status)}>{j.status}</Tag>
+                        <Typography.Text
+                          style={{
+                            maxWidth: 210,
+                            display: 'inline-block',
+                            overflow: 'hidden',
+                            textOverflow: 'ellipsis',
+                            whiteSpace: 'nowrap',
+                            verticalAlign: 'middle',
+                          }}
+                          title={j.video_key}
+                        >
+                          {compactVideoKey(j.video_key)}
+                        </Typography.Text>
+                        <Typography.Text type="secondary"> · {j.completed_chunks}/{j.total_chunks}</Typography.Text>
+                        {j.error_summary ? (
+                          <Typography.Text type="danger"> · {j.error_summary}</Typography.Text>
+                        ) : null}
                       </div>
                     )),
                   },
                 ]}
               />
             )}
-            {job.status === 'done' && job.translated.length > 0 && (
-              <Space style={{ marginTop: 6, width: '100%' }} direction="vertical" size="small">
-                <Button size="small" icon={<CopyOutlined />} onClick={onCopyTranslated} block>
-                  Copy translated ({job.translated.length} lines)
-                </Button>
-                <Button size="small" onClick={onClearOverlay} block>
-                  Hide overlay on page
-                </Button>
-              </Space>
-            )}
           </div>
-        )}
 
-        <Divider style={{ margin: '14px 0 10px' }} />
-
-        {/* Live mode */}
-        <Space style={{ width: '100%', justifyContent: 'space-between' }}>
-          <span>
-            <Typography.Text strong>Live mode</Typography.Text>
-            <Typography.Text type="secondary" style={{ fontSize: 11, marginLeft: 6 }}>
-              translate cues as they appear
-            </Typography.Text>
-          </span>
-          <Switch
-            checked={liveMode}
-            onChange={onLiveModeToggle}
-            disabled={daemon.state !== 'connected' || providers.length === 0}
-          />
-        </Space>
-
-        <Divider style={{ margin: '14px 0 10px' }} />
-
-        {/* Recent jobs (M7) */}
-        {recentJobs.length > 0 && (
           <Collapse
             size="small"
             items={[
               {
-                key: 'rj',
-                label: `Recent jobs (${recentJobs.length})`,
-                children: recentJobs.map((j) => (
-                  <div key={j.job_id} style={{ fontSize: 11, marginBottom: 4 }}>
-                    <Tag color={statusColor(j.status)}>{j.status}</Tag>
-                    {j.video_key} · {j.provider} · {j.completed_chunks}/{j.total_chunks}
-                    {j.error_summary ? ` · ${j.error_summary}` : ''}
-                  </div>
-                )),
+                key: 'manual',
+                label: 'Manual Paste Fallback',
+                children: (
+                  <Space direction="vertical" size="small" style={{ width: '100%' }}>
+                    <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                      Paste translated result here. Keep `[index] text` format.
+                    </Typography.Text>
+                    <Input.TextArea
+                      rows={4}
+                      value={pasteText}
+                      onChange={(e) => { setPasteText(e.target.value); setPasteResult(null) }}
+                      placeholder={'[1] 翻譯後的文字\n[2] 第二行翻譯\n...'}
+                      style={{ fontSize: 12 }}
+                    />
+                    <Button
+                      icon={<CheckOutlined />}
+                      onClick={onApplyPasted}
+                      disabled={!pasteText.trim()}
+                      block
+                    >
+                      Apply to overlay
+                    </Button>
+                    {pasteResult && (
+                      <Alert
+                        type={pasteResult.ok ? 'success' : 'error'}
+                        showIcon
+                        message={pasteResult.message}
+                      />
+                    )}
+                  </Space>
+                ),
               },
             ]}
           />
-        )}
-
-        <Divider style={{ margin: '14px 0 10px' }} />
-
-        {/* Extract original — fallback */}
-        <Typography.Text strong>Fallback: copy original</Typography.Text>
-        <Typography.Paragraph type="secondary" style={{ fontSize: 12, marginTop: 4 }}>
-          For when translation fails — paste into ChatGPT / Gemini web.
-        </Typography.Paragraph>
-        <Space direction="vertical" size="small" style={{ width: '100%' }}>
-          <Button
-            icon={<CopyOutlined />}
-            onClick={onExtract}
-            loading={extract.state === 'working'}
-            block
-          >
-            Extract & Copy ({TARGET_LANG})
-          </Button>
-          {extract.state === 'copied' && (
-            <Alert
-              type="success"
-              showIcon
-              message={`Copied ${extract.entries} lines`}
-              description={extract.payload.title}
-            />
-          )}
-          {extract.state === 'error' && (
-            <Alert type="error" showIcon message={extract.code} description={extract.message} />
-          )}
         </Space>
-
-        <div style={{ marginTop: 10 }}>
-          <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-            Paste translated result here (keep [index] format):
-          </Typography.Text>
-          <Input.TextArea
-            rows={4}
-            value={pasteText}
-            onChange={(e) => { setPasteText(e.target.value); setPasteResult(null) }}
-            placeholder={'[1] 翻譯後的文字\n[2] 第二行翻譯\n...'}
-            style={{ marginTop: 4, fontSize: 12 }}
-          />
-          <Button
-            icon={<CheckOutlined />}
-            onClick={onApplyPasted}
-            disabled={!pasteText.trim()}
-            block
-            style={{ marginTop: 6 }}
-          >
-            Apply to overlay
-          </Button>
-          {pasteResult && (
-            <Alert
-              type={pasteResult.ok ? 'success' : 'error'}
-              showIcon
-              message={pasteResult.message}
-              style={{ marginTop: 6 }}
-            />
-          )}
-        </div>
       </div>
     </ConfigProvider>
   )
+}
+
+function StatusTag({ daemon }: { daemon: DaemonStatus }) {
+  switch (daemon.state) {
+    case 'connected':
+      return <Tag color="green">Connected</Tag>
+    case 'offline':
+      return <Tag color="red">Offline</Tag>
+    case 'checking':
+      return <Tag color="blue">Checking</Tag>
+  }
 }
 
 function statusColor(status: string): string {

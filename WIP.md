@@ -1,5 +1,45 @@
 # Work In Progress
 
+## Session 2026-05-12: icon refresh + popup state rehydration
+
+### Issues fixed
+
+#### 1. Toolbar icon was a temporary `D` mark — FIXED
+- Added deterministic subtitle-badge icon assets under `extension/public/icons/`.
+- Manifest now defines static fallback icons.
+- Background service worker swaps connected/disconnected icon variants based on daemon health.
+
+#### 2. Popup mixed daemon and provider status — FIXED
+- Header now shows daemon state only: Connected, Offline, or Checking.
+- Provider selection is scoped to the Translate panel.
+- Popup layout is grouped into Current Page, Translate Transcript, Quick Actions,
+  Recent Jobs, and Manual Paste Fallback.
+
+#### 3. Popup reopen lost active translate progress — FIXED
+- Content script now tracks full-translate status while it owns the daemon stream.
+- Popup queries `GET_TRANSLATE_STATUS` on mount and polling ticks to rebuild progress
+  after Chrome destroys/recreates the popup.
+
+#### 4. Stale Recent Jobs could not be cleared — FIXED
+- Daemon exposes `DELETE /v1/jobs`.
+- Cache gained `ClearJobs(ctx)`, which clears only job history and keeps
+  translations/transcripts.
+- Popup Recent Jobs includes a confirmed Clear action.
+
+### Files changed this session
+
+- `daemon/internal/cache/*` — jobs-only clear support and tests
+- `daemon/internal/server/*` — `DELETE /v1/jobs` handler and tests
+- `extension/public/icons/*` — connected/disconnected icon assets
+- `extension/manifest.config.ts` and `extension/src/background/index.ts` — static
+  fallback icons and runtime status icon switching
+- `extension/src/content/index.ts` and `extension/src/shared/messaging.ts` —
+  translate status rehydration message/state
+- `extension/src/popup/App.tsx` — popup UI refresh and jobs clear action
+- `README.md`, `codebase.md`, `WIP.md` — documentation updates
+
+---
+
 ## Session 2026-05-11: popup-safe translation + Udemy cue stability
 
 ### Issues fixed

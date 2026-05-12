@@ -216,3 +216,26 @@ func TestStatsAndClear(t *testing.T) {
 		t.Errorf("clear left rows: %+v", s)
 	}
 }
+
+func TestClearJobsOnly(t *testing.T) {
+	ctx := context.Background()
+	c := newTestCache(t)
+	_ = c.StoreTranslations(ctx, []TranslationEntry{{
+		Key: "k1", Provider: "openai", Model: "m", SourceLang: "en", TargetLang: "zh-TW",
+		OriginalText: "x", TranslatedText: "y",
+	}})
+	_ = c.SaveTranscript(ctx, Transcript{VideoKey: "v", Site: "udemy", Title: "t", RawJSON: "[]"})
+	_ = c.CreateJob(ctx, Job{ID: "j", Status: "running", TotalChunks: 1})
+
+	if err := c.ClearJobs(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	s, err := c.Stats(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.Translations != 1 || s.Transcripts != 1 || s.Jobs != 0 {
+		t.Errorf("clear jobs changed the wrong tables: %+v", s)
+	}
+}

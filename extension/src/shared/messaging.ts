@@ -22,6 +22,8 @@ export type ContentMessage =
       translations: Record<string, string> // merges into existing map
     }
   | { type: 'CLEAR_OVERLAY' }
+  | { type: 'HIDE_OVERLAY' }
+  | { type: 'SHOW_OVERLAY' }
   | { type: 'SET_LIVE_MODE'; enabled: boolean; provider?: string; targetLang?: string }
   | {
       type: 'START_TRANSLATE'
@@ -29,6 +31,7 @@ export type ContentMessage =
       request: TranslateRequest
     }
   | { type: 'CANCEL_TRANSLATE' }
+  | { type: 'GET_TRANSLATE_STATUS' }
   | { type: 'PING_OVERLAY' }
 
 export type ExtractTranscriptResponse =
@@ -44,6 +47,30 @@ export type OverlayStatus = {
   videoKey: string | null
   translationsCount: number
 }
+
+export type TranslateStatus =
+  | {
+      ok: true
+      active: false
+      status: 'idle'
+    }
+  | {
+      ok: true
+      active: true
+      jobId: string | null
+      videoKey: string
+      provider: string
+      status: 'running' | 'completed' | 'partial' | 'failed' | 'aborted'
+      totalChunks: number
+      completedChunks: number
+      failedChunks: number
+      totalLines: number
+      translatedLines: number
+      cacheHits: number
+      startedAt: number
+      updatedAt: number
+      errorSummary?: string
+    }
 
 export async function sendToActiveTab<R>(message: ContentMessage): Promise<R> {
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true })

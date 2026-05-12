@@ -1,57 +1,37 @@
 // Background service worker.
-// Periodically polls the daemon's /healthz and renders the toolbar icon to
-// reflect connection state — a small green dot in the bottom-right corner
-// when the daemon is reachable, no dot when it is offline.
+// Periodically polls the daemon's /healthz and swaps the toolbar icon between
+// connected and disconnected variants.
 
 import { DAEMON_URL } from '@/shared/DaemonClient'
 
 const HEALTH_ALARM = 'daemon-healthcheck'
-const POLL_INTERVAL_MIN = 0.5 // 30 seconds — Chrome MV3 minimum is 0.5
+const POLL_INTERVAL_MIN = 0.5 // 30 seconds; Chrome MV3 minimum is 0.5
 const HEALTH_TIMEOUT_MS = 2000
-const ICON_SIZE = 32
 
-function drawIcon(connected: boolean): ImageData {
-  const canvas = new OffscreenCanvas(ICON_SIZE, ICON_SIZE)
-  const ctx = canvas.getContext('2d')
-  if (!ctx) throw new Error('OffscreenCanvas 2d context unavailable')
-
-  ctx.clearRect(0, 0, ICON_SIZE, ICON_SIZE)
-
-  // Rounded-square base in dark gray.
-  ctx.fillStyle = '#262626'
-  ctx.beginPath()
-  ctx.roundRect(2, 2, ICON_SIZE - 4, ICON_SIZE - 4, 6)
-  ctx.fill()
-
-  // "D" wordmark.
-  ctx.fillStyle = '#ffffff'
-  ctx.font = 'bold 18px sans-serif'
-  ctx.textAlign = 'center'
-  ctx.textBaseline = 'middle'
-  ctx.fillText('D', ICON_SIZE / 2, ICON_SIZE / 2 + 1)
-
-  // Connection indicator: small green circle, bottom-right.
-  if (connected) {
-    ctx.fillStyle = '#52c41a'
-    ctx.strokeStyle = '#ffffff'
-    ctx.lineWidth = 1.5
-    ctx.beginPath()
-    ctx.arc(ICON_SIZE - 7, ICON_SIZE - 7, 5, 0, Math.PI * 2)
-    ctx.fill()
-    ctx.stroke()
-  }
-
-  return ctx.getImageData(0, 0, ICON_SIZE, ICON_SIZE)
-}
+const ICONS = {
+  connected: {
+    16: 'icons/icon-connected-16.png',
+    32: 'icons/icon-connected-32.png',
+    48: 'icons/icon-connected-48.png',
+    128: 'icons/icon-connected-128.png',
+  },
+  disconnected: {
+    16: 'icons/icon-disconnected-16.png',
+    32: 'icons/icon-disconnected-32.png',
+    48: 'icons/icon-disconnected-48.png',
+    128: 'icons/icon-disconnected-128.png',
+  },
+} as const
 
 async function applyConnectionState(connected: boolean): Promise<void> {
-  await chrome.action.setIcon({ imageData: drawIcon(connected) })
-  // Clear any leftover badge from a previous version.
+  await chrome.action.setIcon({
+    path: connected ? ICONS.connected : ICONS.disconnected,
+  })
   await chrome.action.setBadgeText({ text: '' })
   await chrome.action.setTitle({
     title: connected
-      ? 'DualSub Next — daemon connected'
-      : 'DualSub Next — daemon offline',
+      ? 'DualSub Next - daemon connected'
+      : 'DualSub Next - daemon offline',
   })
 }
 
@@ -88,7 +68,5 @@ chrome.alarms.onAlarm.addListener((alarm) => {
   if (alarm.name === HEALTH_ALARM) void checkHealth()
 })
 
-// SW may be respawned without onInstalled/onStartup firing again — kick a check
-// at module load so the icon is correct immediately after revival.
 void checkHealth()
 ensureAlarm()
