@@ -39,6 +39,22 @@ Then start the daemon:
 ./dualsub serve
 ```
 
+On Windows, you can run it without keeping a terminal open:
+
+```powershell
+.\dualsub-bg.ps1 start
+.\dualsub-bg.ps1 status
+.\dualsub-bg.ps1 stop
+```
+
+To start the daemon automatically when Windows signs in:
+
+```powershell
+.\dualsub-bg.ps1 install-startup
+```
+
+Logs are written under `%LOCALAPPDATA%\DualSub Next\`.
+
 ### 2. Load the extension
 
 ```bash
