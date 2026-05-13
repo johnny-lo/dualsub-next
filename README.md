@@ -55,6 +55,23 @@ To start the daemon automatically when Windows signs in:
 
 Logs are written under `%LOCALAPPDATA%\DualSub Next\`.
 
+On Linux, the equivalent helper is:
+
+```bash
+chmod +x ./dualsub-bg.sh
+./dualsub-bg.sh start
+./dualsub-bg.sh status
+./dualsub-bg.sh stop
+```
+
+For a user-level systemd service:
+
+```bash
+./dualsub-bg.sh install-systemd
+```
+
+Logs are written under `${XDG_STATE_HOME:-~/.local/state}/dualsub/`.
+
 ### 2. Load the extension
 
 ```bash
