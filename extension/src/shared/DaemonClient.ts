@@ -92,7 +92,7 @@ export interface DaemonConfig {
 export class DaemonClient {
   constructor(private readonly baseURL: string = DAEMON_URL) {}
 
-  async health(): Promise<{ status: string; time: string }> {
+  async health(): Promise<{ status: string; time: string; install_dir?: string }> {
     const res = await fetch(`${this.baseURL}/healthz`)
     if (!res.ok) throw new Error(`HTTP ${res.status}`)
     return res.json()
