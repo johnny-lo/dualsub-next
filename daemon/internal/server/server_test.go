@@ -83,9 +83,20 @@ func TestHealthz(t *testing.T) {
 	if res.StatusCode != 200 {
 		t.Fatalf("status %d", res.StatusCode)
 	}
-	body, _ := io.ReadAll(res.Body)
-	if !strings.Contains(string(body), `"status":"ok"`) {
-		t.Errorf("body = %s", body)
+
+	var body struct {
+		Status     string `json:"status"`
+		Time       string `json:"time"`
+		InstallDir string `json:"install_dir"`
+	}
+	if err := json.NewDecoder(res.Body).Decode(&body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if body.Status != "ok" {
+		t.Errorf("status = %q, want ok", body.Status)
+	}
+	if body.InstallDir == "" {
+		t.Errorf("install_dir is empty; want the test binary's directory")
 	}
 }
 
