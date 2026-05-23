@@ -76,7 +76,6 @@ type TranslateJob = {
 
 const client = new DaemonClient()
 
-
 const panelStyle: CSSProperties = {
   border: '1px solid #e5e7eb',
   borderRadius: 8,
