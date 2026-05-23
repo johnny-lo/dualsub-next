@@ -102,10 +102,16 @@ function buildStartCommand(installDir: string | null): string {
   const isWindows = /windows/i.test(uaPlatform) || /windows/i.test(ua)
   if (isWindows) {
     const script = '.\\dualsub-watch.ps1'
-    return installDir ? `cd '${installDir}'; ${script}` : script
+    if (!installDir) return script
+    // PowerShell single-quoted strings escape a quote by doubling it.
+    const quoted = installDir.replaceAll("'", "''")
+    return `cd '${quoted}'; ${script}`
   }
   const script = './dualsub-watch.sh'
-  return installDir ? `cd '${installDir}' && ${script}` : script
+  if (!installDir) return script
+  // POSIX shell: close the quote, add an escaped quote, reopen.
+  const quoted = installDir.replaceAll("'", "'\\''")
+  return `cd '${quoted}' && ${script}`
 }
 
 function compactVideoKey(videoKey?: string | null): string {
