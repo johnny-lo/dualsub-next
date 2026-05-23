@@ -3,6 +3,8 @@ package server
 import (
 	"encoding/json"
 	"net/http"
+	"os"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"time"
@@ -16,9 +18,24 @@ import (
 
 func handleHealthz(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
-		"status": "ok",
-		"time":   time.Now().UTC().Format(time.RFC3339),
+		"status":      "ok",
+		"time":        time.Now().UTC().Format(time.RFC3339),
+		"install_dir": installDir(),
 	})
+}
+
+// installDir returns the directory that holds the dualsub binary, which is the
+// same directory as the dualsub-watch.sh / dualsub-watch.ps1 helper scripts.
+// Returns "" if the path cannot be resolved.
+func installDir() string {
+	exe, err := os.Executable()
+	if err != nil {
+		return ""
+	}
+	if resolved, err := filepath.EvalSymlinks(exe); err == nil {
+		exe = resolved
+	}
+	return filepath.Dir(exe)
 }
 
 // ─── /v1/providers ──────────────────────────────────────────────────────────

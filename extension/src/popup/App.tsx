@@ -76,9 +76,6 @@ type TranslateJob = {
 
 const client = new DaemonClient()
 
-// Path to the dualsub-next repo on this machine. Edit if you move the repo.
-const DAEMON_DIR_WINDOWS = 'c:\\Users\\j4503\\repos\\dualsub-next'
-
 const panelStyle: CSSProperties = {
   border: '1px solid #e5e7eb',
   borderRadius: 8,
@@ -99,14 +96,22 @@ const sectionTitleStyle: CSSProperties = {
   marginBottom: 8,
 }
 
-function detectStartCommand(): string {
+function buildStartCommand(installDir: string | null): string {
   const ua = navigator.userAgent
   const uaPlatform = (navigator as { userAgentData?: { platform?: string } }).userAgentData?.platform ?? ''
   const isWindows = /windows/i.test(uaPlatform) || /windows/i.test(ua)
   if (isWindows) {
-    return `cd '${DAEMON_DIR_WINDOWS}'; .\\dualsub-watch.ps1`
+    const script = '.\\dualsub-watch.ps1'
+    if (!installDir) return script
+    // PowerShell single-quoted strings escape a quote by doubling it.
+    const quoted = installDir.replaceAll("'", "''")
+    return `cd '${quoted}'; ${script}`
   }
-  return './dualsub-watch.sh'
+  const script = './dualsub-watch.sh'
+  if (!installDir) return script
+  // POSIX shell: close the quote, add an escaped quote, reopen.
+  const quoted = installDir.replaceAll("'", "'\\''")
+  return `cd '${quoted}' && ${script}`
 }
 
 function compactVideoKey(videoKey?: string | null): string {
@@ -157,7 +162,8 @@ export default function App() {
   const [recentJobs, setRecentJobs] = useState<JobSummary[]>([])
   const [pasteText, setPasteText] = useState('')
   const [pasteResult, setPasteResult] = useState<{ ok: boolean; message: string } | null>(null)
-  const startCommand = useMemo(() => detectStartCommand(), [])
+  const [installDir, setInstallDir] = useState<string | null>(null)
+  const startCommand = useMemo(() => buildStartCommand(installDir), [installDir])
   const [copiedStart, setCopiedStart] = useState(false)
 
   const refreshRecentJobs = async () => {
@@ -196,6 +202,10 @@ export default function App() {
     try {
       const h = await client.health()
       setDaemon({ state: 'connected', serverTime: h.time })
+      if (h.install_dir) {
+        setInstallDir(h.install_dir)
+        void chrome.storage.local.set({ daemonInstallDir: h.install_dir })
+      }
       try {
         const list = await client.listProviders()
         setProviders(list)
@@ -209,6 +219,13 @@ export default function App() {
       setDaemon({ state: 'offline', error: (err as Error).message })
     }
   }
+
+  useEffect(() => {
+    chrome.storage.local.get('daemonInstallDir').then((r) => {
+      const dir = r.daemonInstallDir
+      if (typeof dir === 'string' && dir) setInstallDir(dir)
+    })
+  }, [])
 
   useEffect(() => {
     void refreshDaemon()
@@ -468,6 +485,11 @@ export default function App() {
               />
               <Button size="small" icon={<CopyOutlined />} onClick={onCopyStartCommand} />
             </Space.Compact>
+            {!installDir && (
+              <Typography.Text type="secondary" style={{ display: 'block', fontSize: 11, marginTop: 4 }}>
+                找不到腳本的話，請先 cd 到 dualsub 安裝目錄。
+              </Typography.Text>
+            )}
             {copiedStart && (
               <Typography.Text type="success" style={{ display: 'block', fontSize: 11, marginTop: 4 }}>
                 Copied.

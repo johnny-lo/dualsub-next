@@ -42,6 +42,13 @@ async function checkHealth(): Promise<void> {
       signal: AbortSignal.timeout(HEALTH_TIMEOUT_MS),
     })
     ok = res.ok
+    if (ok) {
+      const body = (await res.json().catch(() => null)) as { install_dir?: unknown } | null
+      const dir = body?.install_dir
+      if (typeof dir === 'string' && dir) {
+        await chrome.storage.local.set({ daemonInstallDir: dir })
+      }
+    }
   } catch {
     ok = false
   }

@@ -75,8 +75,8 @@ while true; do
 
   # Bail if the daemon died on its own (e.g., bad config).
   if [[ -n "${DAEMON_PID}" ]] && ! kill -0 "${DAEMON_PID}" 2>/dev/null; then
-    wait "${DAEMON_PID}" 2>/dev/null || true
-    rc=$?
+    rc=0
+    wait "${DAEMON_PID}" 2>/dev/null || rc=$?
     echo "[watch] dualsub exited (code ${rc}) — bailing out" >&2
     DAEMON_PID=
     exit "${rc}"
