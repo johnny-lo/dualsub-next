@@ -2,11 +2,14 @@
 // Periodically polls the daemon's /healthz and swaps the toolbar icon between
 // connected and disconnected variants.
 
-import { DAEMON_URL } from '@/shared/DaemonClient'
+import { DAEMON_URL, DaemonClient } from '@/shared/DaemonClient'
+import type { DaemonStreamCommand, DaemonStreamEvent } from '@/shared/messaging'
 
 const HEALTH_ALARM = 'daemon-healthcheck'
 const POLL_INTERVAL_MIN = 0.5 // 30 seconds; Chrome MV3 minimum is 0.5
 const HEALTH_TIMEOUT_MS = 2000
+const TRANSLATE_PORT = 'dualsub-daemon-translate'
+const daemon = new DaemonClient()
 
 const ICONS = {
   connected: {
@@ -73,6 +76,53 @@ chrome.runtime.onStartup.addListener(() => {
 
 chrome.alarms.onAlarm.addListener((alarm) => {
   if (alarm.name === HEALTH_ALARM) void checkHealth()
+})
+
+chrome.runtime.onConnect.addListener((port) => {
+  if (port.name !== TRANSLATE_PORT) return
+
+  let abort: (() => void) | null = null
+  let started = false
+
+  const send = (message: DaemonStreamEvent) => {
+    try {
+      port.postMessage(message)
+    } catch {
+      abort?.()
+      abort = null
+    }
+  }
+
+  port.onMessage.addListener((raw: unknown) => {
+    const message = raw as DaemonStreamCommand
+    if (message.type === 'ping') return
+    if (message.type === 'cancel') {
+      abort?.()
+      abort = null
+      return
+    }
+    if (message.type !== 'start' || started) return
+
+    started = true
+    abort = daemon.translate(message.request, {
+      onJobCreated: (payload) => send({ type: 'job-created', payload }),
+      onChunkDone: (payload) => send({ type: 'chunk-done', payload }),
+      onChunkError: (payload) => send({ type: 'chunk-error', payload }),
+      onDone: (payload) => {
+        abort = null
+        send({ type: 'done', payload })
+      },
+      onFatal: (err) => {
+        abort = null
+        send({ type: 'fatal', message: err.message })
+      },
+    })
+  })
+
+  port.onDisconnect.addListener(() => {
+    abort?.()
+    abort = null
+  })
 })
 
 void checkHealth()

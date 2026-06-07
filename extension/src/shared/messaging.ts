@@ -1,5 +1,11 @@
 import type { TranscriptPayload } from './transcript'
-import type { TranslateRequest } from './DaemonClient'
+import type {
+  ChunkDonePayload,
+  ChunkErrorPayload,
+  DonePayload,
+  JobCreatedPayload,
+  TranslateRequest,
+} from './DaemonClient'
 
 export type ContentMessage =
   | { type: 'EXTRACT_TRANSCRIPT'; preferredLang?: string }
@@ -33,6 +39,7 @@ export type ContentMessage =
   | { type: 'CANCEL_TRANSLATE' }
   | { type: 'GET_TRANSLATE_STATUS' }
   | { type: 'PING_OVERLAY' }
+  | { type: 'CAPTION_SNAPSHOT' }
 
 export type ExtractTranscriptResponse =
   | { ok: true; payload: TranscriptPayload }
@@ -40,12 +47,60 @@ export type ExtractTranscriptResponse =
 
 export type SimpleAck = { ok: true } | { ok: false; message: string }
 
+export type DaemonStreamCommand =
+  | { type: 'start'; request: TranslateRequest }
+  | { type: 'cancel' }
+  | { type: 'ping' }
+
+export type DaemonStreamEvent =
+  | { type: 'job-created'; payload: JobCreatedPayload }
+  | { type: 'chunk-done'; payload: ChunkDonePayload }
+  | { type: 'chunk-error'; payload: ChunkErrorPayload }
+  | { type: 'done'; payload: DonePayload }
+  | { type: 'fatal'; message: string }
+
 export type OverlayStatus = {
   ok: true
   mounted: boolean
   liveMode: boolean
   videoKey: string | null
   translationsCount: number
+}
+
+// Diagnostic snapshot of caption-bearing DOM, returned by CAPTION_SNAPSHOT.
+// This is debug-only: a broad probe to figure out WHERE the real caption is
+// rendered when detection fails. It never feeds live caption selection.
+export type CaptionCandidate = {
+  // 'selector' = matched a known/broad caption-ish selector;
+  // 'lower-video-leaf' = a text leaf sitting over the lower video area that
+  // matched no selector — the case where detection is otherwise stuck.
+  source: 'selector' | 'lower-video-leaf'
+  tag: string
+  id: string
+  className: string
+  role: string | null
+  dataAttrs: Record<string, string>
+  ariaAttrs: Record<string, string>
+  rect: { x: number; y: number; w: number; h: number }
+  overlapsVideo: boolean
+  display: string
+  visibility: string
+  opacity: string
+  childCount: number
+  matchesAuthoritative: boolean
+  text: string
+}
+
+export type CaptionSnapshot = {
+  ok: true
+  url: string
+  site: string
+  videoKey: string | null
+  timestamp: number
+  authoritativePresent: boolean
+  authoritativeText: string | null
+  video: { rect: { x: number; y: number; w: number; h: number }; readyState: number; textTracks: number } | null
+  candidates: CaptionCandidate[]
 }
 
 export type TranslateStatus =

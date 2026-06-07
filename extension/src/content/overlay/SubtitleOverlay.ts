@@ -7,6 +7,11 @@ export interface OverlayStyle {
   translatedColor?: string
 }
 
+interface OverlayPosition {
+  x: number
+  y: number
+}
+
 const DEFAULT_STYLE: Required<OverlayStyle> = {
   originalSize: 18,
   originalColor: '#ffffff',
@@ -14,10 +19,17 @@ const DEFAULT_STYLE: Required<OverlayStyle> = {
   translatedColor: '#ffd54f',
 }
 
+const DEFAULT_POSITION: OverlayPosition = { x: 0.5, y: 0.84 }
+const POSITION_STORAGE_KEY = 'dualsubOverlayPosition'
+
+function clamp(value: number, min: number, max: number): number {
+  return Math.min(max, Math.max(min, value))
+}
+
 /**
  * Bilingual subtitle overlay rendered into a Shadow DOM so the host page's
- * CSS cannot affect it. Mounts a fixed-position container near the bottom of
- * the viewport; the user can drag with the mouse to reposition.
+ * CSS cannot affect it. Position is stored as normalized host coordinates so
+ * dragging remains stable across normal, fullscreen, and resized viewports.
  */
 export class SubtitleOverlay {
   private host: HTMLDivElement
@@ -28,7 +40,12 @@ export class SubtitleOverlay {
   private translations = new Map<string, string>()
   private dragging = false
   private dragOffsetFromCenter = { x: 0, y: 0 }
-  private readonly onFullscreenChange = () => this.mountHost()
+  private position: OverlayPosition = { ...DEFAULT_POSITION }
+  private readonly onFullscreenChange = () => {
+    this.mountHost()
+    window.requestAnimationFrame(() => this.applyPosition())
+  }
+  private readonly onResize = () => this.applyPosition()
   private nativeCaptionStyle: HTMLStyleElement | null = null
   private currentStyle: Required<OverlayStyle> = { ...DEFAULT_STYLE }
 
@@ -43,13 +60,27 @@ export class SubtitleOverlay {
   }
   private onMouseMove = (e: MouseEvent) => {
     if (!this.dragging) return
-    this.container.style.left = `${e.clientX - this.dragOffsetFromCenter.x}px`
-    this.container.style.top = `${e.clientY - this.dragOffsetFromCenter.y}px`
-    this.container.style.bottom = 'auto'
-    this.container.style.transform = 'translate(-50%, -50%)'
+    const bounds = this.getHostBounds()
+    if (bounds.width <= 0 || bounds.height <= 0) return
+
+    this.position = {
+      x: clamp(
+        (e.clientX - this.dragOffsetFromCenter.x - bounds.left) / bounds.width,
+        0,
+        1,
+      ),
+      y: clamp(
+        (e.clientY - this.dragOffsetFromCenter.y - bounds.top) / bounds.height,
+        0,
+        1,
+      ),
+    }
+    this.applyPosition()
   }
   private onMouseUp = () => {
+    if (!this.dragging) return
     this.dragging = false
+    this.savePosition()
   }
 
   constructor() {
@@ -74,21 +105,21 @@ export class SubtitleOverlay {
     this.mountHost()
     this.hideNativeCaptions()
     document.addEventListener('fullscreenchange', this.onFullscreenChange)
+    window.addEventListener('resize', this.onResize)
 
-    // Load saved style from chrome.storage
+    // Load saved appearance and normalized position from chrome.storage.
     this.loadStyleFromStorage()
+    this.loadPositionFromStorage()
   }
 
   private buildCSS(s: Required<OverlayStyle>): string {
     return `
       :host { all: initial; }
       .container {
-        position: fixed;
+        position: absolute;
         z-index: 2147483647;
-        left: 50%;
-        bottom: 12%;
-        transform: translateX(-50%);
-        max-width: 80vw;
+        transform: translate(-50%, -50%);
+        max-width: 80%;
         padding: 10px 18px;
         background: rgba(0, 0, 0, 0.78);
         color: #fff;
@@ -136,6 +167,70 @@ export class SubtitleOverlay {
 
   setStyle(style: OverlayStyle): void {
     this.applyStyle({ ...DEFAULT_STYLE, ...style })
+    window.requestAnimationFrame(() => this.applyPosition())
+  }
+
+  private loadPositionFromStorage() {
+    try {
+      chrome.storage.local.get([POSITION_STORAGE_KEY], (data) => {
+        const stored = data[POSITION_STORAGE_KEY] as Partial<OverlayPosition> | undefined
+        if (
+          stored &&
+          typeof stored.x === 'number' &&
+          Number.isFinite(stored.x) &&
+          typeof stored.y === 'number' &&
+          Number.isFinite(stored.y)
+        ) {
+          this.position = {
+            x: clamp(stored.x, 0, 1),
+            y: clamp(stored.y, 0, 1),
+          }
+        }
+        this.applyPosition()
+      })
+    } catch {
+      this.applyPosition()
+    }
+  }
+
+  private savePosition() {
+    try {
+      void chrome.storage.local.set({ [POSITION_STORAGE_KEY]: this.position })
+    } catch {
+      // storage not available (e.g. in tests)
+    }
+  }
+
+  private getHostBounds(): DOMRect {
+    const bounds = this.host.getBoundingClientRect()
+    if (bounds.width > 0 && bounds.height > 0) return bounds
+    return new DOMRect(0, 0, window.innerWidth, window.innerHeight)
+  }
+
+  private displayPosition(): OverlayPosition {
+    const bounds = this.getHostBounds()
+    const rect = this.container.getBoundingClientRect()
+    if (bounds.width <= 0 || bounds.height <= 0) return this.position
+
+    const halfWidth = Math.min(rect.width / 2, bounds.width / 2)
+    const halfHeight = Math.min(rect.height / 2, bounds.height / 2)
+    const minX = halfWidth / bounds.width
+    const maxX = 1 - minX
+    const minY = halfHeight / bounds.height
+    const maxY = 1 - minY
+
+    return {
+      x: clamp(this.position.x, minX, maxX),
+      y: clamp(this.position.y, minY, maxY),
+    }
+  }
+
+  private applyPosition() {
+    const display = this.displayPosition()
+    this.container.style.left = `${display.x * 100}%`
+    this.container.style.top = `${display.y * 100}%`
+    this.container.style.bottom = 'auto'
+    this.container.style.transform = 'translate(-50%, -50%)'
   }
 
   private hideNativeCaptions() {
@@ -151,6 +246,8 @@ export class SubtitleOverlay {
     this.nativeCaptionStyle.textContent = `
       [class*="captions-display--"],
       [class*="captions-cue--"],
+      [class*="well-module--text--"],
+      [class*="well-module--container--"],
       [class*="well--text--"],
       [class*="well--container--"],
       [data-purpose="captions-cue-text"],
@@ -181,6 +278,7 @@ export class SubtitleOverlay {
   private mountHost() {
     const parent = document.fullscreenElement ?? document.body ?? document.documentElement
     if (this.host.parentElement !== parent) parent.appendChild(this.host)
+    this.applyPosition()
   }
 
   private attachDragHandlers() {
@@ -285,12 +383,14 @@ export class SubtitleOverlay {
       line.appendChild(trans)
       this.linesEl.appendChild(line)
     }
+    window.requestAnimationFrame(() => this.applyPosition())
   }
 
   destroy(): void {
     this.container.removeEventListener('mousedown', this.onMouseDown)
     window.removeEventListener('mousemove', this.onMouseMove)
     window.removeEventListener('mouseup', this.onMouseUp)
+    window.removeEventListener('resize', this.onResize)
     document.removeEventListener('fullscreenchange', this.onFullscreenChange)
     this.showNativeCaptions()
     this.host.remove()

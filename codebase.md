@@ -57,8 +57,12 @@ No auth, no TLS — localhost-only single-user.
 [Content script overlay (Shadow DOM) renders bilingual cue on the video]
 ```
 
-Live mode skips the popup: content script directly calls
-`DaemonClient.translate()` with one line per cue as cuechange fires.
+Live mode skips the popup: the content script translates one line per cue as
+cuechange fires. Both live and full-transcript translation run through the
+**background service worker** (`translateViaBackground` → `dualsub-daemon-translate`
+port → worker runs `DaemonClient.translate()`; see §4.7), not by fetching the
+daemon from the content script. This keeps the SSE stream alive independent of
+popup teardown and MV3 content-script churn.
 
 ## 3. File map
 
@@ -80,20 +84,20 @@ Live mode skips the popup: content script directly calls
 |---|---|
 | `manifest.config.ts` | MV3 manifest defined in TS via `@crxjs/vite-plugin`. `host_permissions` includes `http://127.0.0.1:7878/*` — needed for content-script fetches to daemon. Defines static extension icons from `public/icons/` for manifest and action fallback. |
 | `vite.config.ts` | CRXJS plugin builds the extension; `@/` alias = `src/`. |
-| `src/background/index.ts` | MV3 service worker. Polls daemon `/healthz` every 30 seconds and swaps the toolbar icon between connected/disconnected variants from `public/icons/`. |
-| `src/content/index.ts` | Message router. Receives: `EXTRACT_TRANSCRIPT`, `SET_OVERLAY` (now carries optional `autoTranslate` config), `PATCH_OVERLAY`, `CLEAR_OVERLAY`, `SET_LIVE_MODE`, `START_TRANSLATE`, `CANCEL_TRANSLATE`, `GET_TRANSLATE_STATUS`, `PING_OVERLAY`. Holds module-scoped state: overlay, Live mode, sticky `autoTranslateConfig`, background full-translate abort handles, and current full-translate status for popup rehydration. Persists translation cache (`dualsubTranslationCache`) and sticky auto-translate config (`dualsubAutoTranslate`) to `chrome.storage.local`. Popup-initiated full translation runs here so Chrome closing the popup does not abort the daemon stream. `bootstrap()` runs on script load: restores config + cached overlay, fires `autoTranslateCurrentLecture()` if no cache but config exists. Udemy SPA nav (`pushState`/`replaceState`/`popstate`) calls `stopAll({ forNavigation: true })` (preserves liveMode + auto config) then runs the same restore + auto-translate sequence. Exposes `window.__dualsubDebug` (also on `globalThis`) with `diag()` + `dumpAll()` for DevTools inspection. |
+| `src/background/index.ts` | MV3 service worker. Polls daemon `/healthz` every 30 seconds and swaps the toolbar icon between connected/disconnected variants from `public/icons/`. **Also relays the daemon `/v1/translate` SSE stream**: a content script connects a `dualsub-daemon-translate` port, the worker runs `DaemonClient.translate()` and forwards typed events back (see §4.7), so translation survives popup/content lifecycle churn. |
+| `src/content/index.ts` | Message router. Receives: `EXTRACT_TRANSCRIPT`, `SET_OVERLAY` (now carries optional `autoTranslate` config), `PATCH_OVERLAY`, `CLEAR_OVERLAY`, `SET_LIVE_MODE`, `START_TRANSLATE`, `CANCEL_TRANSLATE`, `GET_TRANSLATE_STATUS`, `PING_OVERLAY`. Holds module-scoped state: overlay, Live mode, sticky `autoTranslateConfig`, background full-translate abort handles, and current full-translate status for popup rehydration. Persists translation cache (`dualsubTranslationCache`) and sticky auto-translate config (`dualsubAutoTranslate`) to `chrome.storage.local`. Popup-initiated full translation runs here so Chrome closing the popup does not abort the daemon stream. `bootstrap()` runs on script load: restores config + cached overlay, fires `autoTranslateCurrentLecture()` if no cache but config exists. Udemy SPA nav (`pushState`/`replaceState`/`popstate`) calls `stopAll({ forNavigation: true })` (preserves liveMode + auto config) then runs the same restore + auto-translate sequence. Translation (full + live) is dispatched via `translateViaBackground()` over the `dualsub-daemon-translate` port to the service worker (see §4.7), not the daemon directly. Handles `CAPTION_SNAPSHOT` (debug DOM probe — see §7). Exposes `window.__dualsubDebug` (also on `globalThis`) with `diag()` + `dumpAll()` + `snapshot()` for DevTools inspection. |
 | `src/content/extractors/types.ts` | `SubtitleExtractor` interface, `SiteId` union, `ExtractError`. |
 | `src/content/extractors/index.ts` | `detectSite()` factory — single registration point for new sites. |
 | `src/content/extractors/NetflixExtractor.ts` | Netflix extractor. `video.textTracks` for both extraction and observation. |
-| `src/content/extractors/UdemyExtractor.ts` | Udemy extractor. **Tier 1 REST API for extraction** (Tier 2 textTrack as fallback only). **`observeUdemyCaptions` polls DOM every 300ms for live observation** — Udemy's [CC] track does not populate `video.textTracks`. Cue observation is intentionally limited to known Udemy caption containers. When no cue is detected, it waits 2 seconds before emitting `null`, so normal short gaps keep the current subtitle while avoiding broad DOM fallbacks that can grab course-progress or language labels. |
+| `src/content/extractors/UdemyExtractor.ts` | Udemy extractor. **Tier 1 REST API for extraction** (Tier 2 textTrack as fallback only). **`observeUdemyCaptions` polls DOM every 300ms for live observation** — Udemy's [CC] track does not populate `video.textTracks`. Live cue text comes from `UDEMY_PRIMARY_CUE_SELECTORS` — an **ordered list of the dedicated cue-text elements, newest class first** (`[data-purpose="captions-cue-text"]` → `[class*="well-module--text--"]` → `[class*="well--text--"]`); the first that exists is trusted exclusively (empty = no active cue), never falling through to broad fallbacks that grab course-progress or language labels (see §7 on class drift). When no cue is detected, it waits 2 seconds before emitting `null` so normal short gaps keep the current subtitle. |
 | `src/content/extractors/cueObserver.ts` | TextTrack-based cue subscription. Used by Netflix; **NOT used by Udemy** (Udemy uses DOM polling — see §7). Emits `ActiveCue { texts: string[], ... }` so multiple simultaneous cues stay distinct (cache keys are per-cue). |
 | `src/content/extractors/textTrack.ts` | Helper: `waitForCues` + `cuesToEntries` for full-transcript bulk extraction. |
 | `src/content/extractors/parseVtt.ts` | VTT parser used by Udemy Tier 1. |
-| `src/content/overlay/SubtitleOverlay.ts` | Shadow-DOM bilingual overlay. Drag-to-reposition with the overlay anchored by its center point, so line-length changes remain centered after dragging. `setTranslations()` replaces, `patchTranslations()` merges. `render(texts: string[] \| null)` builds one `(original, translated)` pair per active cue; lookup uses `normalizeText()` + a fuzzy fallback (longest-substring containment, then word-overlap Jaccard ≥ 0.6) to bridge VTT-source vs DOM-rendered cue divergence. Hides native captions via injected `<style id="dualsub-hide-native-captions">` covering Udemy (`captions-display--*`, `captions-cue--*`, `well--text--*`, `well--container--*`, `[data-purpose="captions-cue-text"]`, `[data-purpose="captions-display"]`) + Netflix (`.player-timedtext`) + `video::cue`, layered `opacity:0` + `visibility:hidden` + `color:transparent` + `text-shadow:none`. Supports `OverlayStyle` (font size/color) stored in `chrome.storage.local` under `dualsubOverlayStyle`. `debugSampleKeys(n)` exposed for the `__dualsubDebug.diag()` helper. |
+| `src/content/overlay/SubtitleOverlay.ts` | Shadow-DOM bilingual overlay. Drag-to-reposition with the overlay anchored by its center point, so line-length changes remain centered after dragging. **Position is stored as normalized host coordinates** (`{x,y}` in 0–1) in `chrome.storage.local` under `dualsubOverlayPosition`, so dragging stays stable across normal/fullscreen/resized viewports; the container is `position:absolute` inside a `position:fixed; inset:0` host. `setTranslations()` replaces, `patchTranslations()` merges. `render(texts: string[] \| null)` builds one `(original, translated)` pair per active cue; lookup uses `normalizeText()` + a fuzzy fallback (longest-substring containment, then word-overlap Jaccard ≥ 0.6) to bridge VTT-source vs DOM-rendered cue divergence. Hides native captions via injected `<style id="dualsub-hide-native-captions">` covering Udemy (`captions-display--*`, `captions-cue--*`, `well--text--*`, `well--container--*`, `[data-purpose="captions-cue-text"]`, `[data-purpose="captions-display"]`) + Netflix (`.player-timedtext`) + `video::cue`, layered `opacity:0` + `visibility:hidden` + `color:transparent` + `text-shadow:none`. Supports `OverlayStyle` (font size/color) stored in `chrome.storage.local` under `dualsubOverlayStyle`. `debugSampleKeys(n)` exposed for the `__dualsubDebug.diag()` helper. |
 | `src/popup/App.tsx` | Main UI. Header shows daemon status only; provider selection lives in the Translate panel. Popup queries `GET_TRANSLATE_STATUS` on mount and polling ticks to restore progress after popup teardown. Recent Jobs can clear job history via `DELETE /v1/jobs`; translation and transcript caches are preserved. |
 | `src/options/App.tsx` | Antd Form covering server / translate / cache / 3 providers. Saves via `client.putConfig()`; UI tells user to restart daemon. Also has "Subtitle Overlay Style" section for font size/color settings (saved to `chrome.storage.local`). |
 | `src/shared/DaemonClient.ts` | One class wrapping daemon HTTP + SSE. `translate(req, handlers)` returns an abort fn; `clearJobs()` calls `DELETE /v1/jobs`. |
-| `src/shared/messaging.ts` | `ContentMessage` discriminated union + `sendToActiveTab()`. **All popup ↔ content message types live here**, nowhere else. Includes `START_TRANSLATE` / `CANCEL_TRANSLATE` for background full-transcript translation and `GET_TRANSLATE_STATUS` for popup rehydration. |
+| `src/shared/messaging.ts` | `ContentMessage` discriminated union + `sendToActiveTab()`. **All popup ↔ content message types live here**, nowhere else. Includes `START_TRANSLATE` / `CANCEL_TRANSLATE` for background full-transcript translation, `GET_TRANSLATE_STATUS` for popup rehydration, and `CAPTION_SNAPSHOT` (debug DOM probe). Also defines the content↔worker relay port protocol (`DaemonStreamCommand` / `DaemonStreamEvent`, see §4.7) and the `CaptionSnapshot` / `CaptionCandidate` shapes. |
 | `src/shared/transcript.ts` | `TranscriptEntry`, `formatTranscriptForExport`, `normalizeText`, `parseTranslatedTranscript`. `normalizeText` does NFKC + lowercase + smart-quote/dash unification + strips `\p{P}\p{S}` (preserves CJK via Unicode property escapes — do not switch to `\w`). `parseTranslatedTranscript` is used by the popup paste-back flow to parse `[index] text` format. |
 
 ## 4. Critical contracts (cross-file invariants)
@@ -178,6 +182,28 @@ ChunkSize int `toml:"chunk_size" json:"chunk_size"`
 ```
 
 Drop one and you'll silently break either disk persistence or the HTTP API.
+
+### 4.7 Content ↔ service-worker translate relay
+
+The content script does **not** fetch the daemon directly for translation.
+`translateViaBackground()` (`content/index.ts`) opens a `chrome.runtime.connect`
+port named `dualsub-daemon-translate`; the service worker (`background/index.ts`)
+runs the actual `DaemonClient.translate()` and forwards events back. Both sides'
+message shapes live in `messaging.ts`:
+
+- `DaemonStreamCommand` (content → worker): `start` (carries the
+  `TranslateRequest`), `cancel`, `ping`.
+- `DaemonStreamEvent` (worker → content): `job-created`, `chunk-done`,
+  `chunk-error`, `done`, `fatal` — these wrap the same `DaemonClient` payloads
+  as §4.3.
+
+Invariants that bite if you forget:
+- A 20s `ping` heartbeat from the content side keeps the MV3 worker from being
+  killed mid-stream. Don't remove it.
+- Both sides guard a single `terminal`/`finish()` latch so `done`/`fatal`/
+  disconnect fire their handler exactly once.
+- `port.onDisconnect` on the content side surfaces as an `onFatal` unless a
+  terminal event already arrived — a closed worker is a failed translation.
 
 ## 5. Conventions
 
@@ -284,18 +310,29 @@ There is no migration story. Either:
   in module-scoped vars). `CLEAR_OVERLAY` is the explicit opt-out: it
   wipes both module state and `dualsubAutoTranslate`.
 - **Udemy [CC] is not in `video.textTracks`**. The Udemy player renders
-  [CC] caption text into a DOM element matching `[data-purpose="captions-cue-text"]`
-  (class `captions-display--captions-cue-text--*`) and never populates the
-  HTML5 TextTrack API for it. `UdemyExtractor` therefore uses
-  `observeUdemyCaptions` (300ms DOM poll + MutationObserver) for live observation,
-  and `extractFullTranscript` prefers Tier 1 REST API. The primary selector
-  `[data-purpose="captions-cue-text"]` is authoritative — when it exists, broad
-  fallback selectors are not consulted (to avoid picking up unrelated page
-  elements like the progress tooltip or language menu).
+  [CC] caption text into a DOM element it owns and never populates the HTML5
+  TextTrack API for it. `UdemyExtractor` therefore uses `observeUdemyCaptions`
+  (300ms DOM poll + MutationObserver) for live observation, and
+  `extractFullTranscript` prefers Tier 1 REST API.
+- **The Udemy cue-text element drifts across player versions — do not hardcode
+  one selector.** Older builds rendered into `[data-purpose="captions-cue-text"]`
+  (class `well--text--<hash>`); newer builds **drop the `data-purpose` hook
+  entirely** and use the CSS-modules name `well-module--text--<hash>` (confirmed
+  2026-06 on a KCA course: `authoritativePresent:false`, real cue in
+  `span.well-module--text--…`). `UDEMY_PRIMARY_CUE_SELECTORS` is an **ordered
+  list, newest class first**; the first match is trusted exclusively and broad
+  fallbacks are not consulted (avoids grabbing the progress tooltip, language
+  menu, or the "距離到期日" expiry banner — all of which are `aria-live`/`role=
+  status` and *will* be picked if you re-add broad selectors). When detection
+  breaks again, use the popup's **Dump caption DOM** button (or
+  `__dualsubDebug.snapshot()`) to find the new class, then prepend it to the
+  primary list and add it to the hide CSS — do **not** widen to generic
+  `[class*="caption"]` / `[aria-live]` probes for live selection.
 - **Native caption hiding**: `SubtitleOverlay` injects
   `<style id="dualsub-hide-native-captions">` covering all known Udemy
   caption surfaces (`captions-display--*`, `captions-cue--*`,
-  `well--text--*`, `well--container--*`, `[data-purpose="captions-cue-text"]`,
+  `well-module--text--*`, `well-module--container--*`, `well--text--*`,
+  `well--container--*`, `[data-purpose="captions-cue-text"]`,
   `[data-purpose="captions-display"]`) plus Netflix's `.player-timedtext` plus
   `video::cue`. Uses `opacity:0 + visibility:hidden + color:transparent +
   text-shadow:none` for defense in depth — host CSS sometimes overrides a
@@ -314,6 +351,20 @@ There is no migration story. Either:
 - **Udemy SPA lecture switching swaps the `<video>` element**. `startCueObserver`
   in `content/index.ts` re-attaches every time it is called — do not re-add a
   "skip if disposer exists" guard.
+- **Caption-detection self-diagnosis**: the popup's "Dump caption DOM" button
+  (Diagnostics collapse) sends `CAPTION_SNAPSHOT` → `buildCaptionSnapshot()` in
+  `content/index.ts`, which returns a structured JSON probe of every plausible
+  caption element (tag/class/data-*/aria/rect/visibility/text) plus the `<video>`
+  rect and whether the authoritative selector is present. Two passes: known/broad
+  caption selectors, **and** text leaves sitting over the lower video area
+  (`source:'lower-video-leaf'`) — the second pass is what catches a real caption
+  that matches no known selector (e.g. the `well-module--text--` drift, whose
+  rect centre falls just *below* the video so `overlapsVideo` is false). This
+  probe is **diagnostic only** and never feeds live caption selection. Same data
+  is available as `__dualsubDebug.snapshot()`.
+- **Content script never fetches the daemon directly for translation** — it goes
+  through the background relay port (§4.7). If you see a translate request hitting
+  the daemon from a content-script origin, something bypassed the relay.
 
 ## 8. Things deliberately NOT done — do not "fix"
 

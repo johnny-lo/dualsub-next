@@ -1,5 +1,77 @@
 # Work In Progress
 
+## Session 2026-06-07: Udemy caption class drift + background relay + DOM snapshot
+
+### Issues fixed
+
+#### 1. Udemy live captions not detected on newer player — FIXED
+Symptom: overlay showed nothing / grabbed the "距離到期日" expiry banner.
+
+Root cause (proven by the new Dump tool): this Udemy version **dropped
+`[data-purpose="captions-cue-text"]` entirely** (`authoritativePresent:false`)
+and **renamed the caption class** from `well--text--<hash>` to the CSS-modules
+name `well-module--text--<hash>`. The existing `[class*="well--text--"]`
+selector no longer matched, so detection fell to broad fallbacks that picked up
+`aria-live`/`role=status` banners.
+
+Fix (`UdemyExtractor.ts`):
+- Primary cue selection is now `UDEMY_PRIMARY_CUE_SELECTORS`, an ordered list
+  (newest class first); first match is trusted exclusively, no broad fallthrough.
+- Added `well-module--text--` / `well-module--container--` to the fallback and
+  native-caption selector lists; sort tiebreaker uses `/well(-module)?--/`.
+- `SubtitleOverlay.hideNativeCaptions` hides the new `well-module--*` surfaces too.
+
+A short-lived experiment that *added* broad selectors (`[aria-live]`,
+`[role=status]`, `[class*=caption]`) + a scoring heuristic was **reverted** —
+it re-introduced exactly the garbage-grabbing §8 warns about.
+
+#### 2. Popup teardown / MV3 churn could drop the translate stream — FIXED
+The SSE fetch used to live in the content script. Moved it to the background
+service worker: content opens a `dualsub-daemon-translate` port, the worker runs
+`DaemonClient.translate()` and relays typed events back (`DaemonStreamCommand` /
+`DaemonStreamEvent`). A 20s heartbeat keeps the worker alive; both sides latch a
+single terminal event. See codebase.md §4.7.
+
+#### 3. Overlay jumped on fullscreen / resize — FIXED
+Overlay position is now stored as **normalized host coordinates** (0–1) in
+`chrome.storage.local` under `dualsubOverlayPosition`, re-applied on
+fullscreenchange/resize/render. Container is `position:absolute` inside the
+`position:fixed; inset:0` host.
+
+### Feature added
+
+#### 4. One-click caption DOM snapshot (debug) — NEW
+Popup "Caption DOM Snapshot (debug)" panel → **Dump caption DOM** sends
+`CAPTION_SNAPSHOT` → `buildCaptionSnapshot()`, which probes every plausible
+caption element (class/data-*/aria/rect/visibility/text) + the `<video>` rect.
+Two passes: selector-based, and **text leaves over the lower video area** (the
+pass that found the `well-module--text--` cue, whose centre is below the video).
+Shown inline with a Copy button; also `__dualsubDebug.snapshot()`. This removes
+the "ask how to dump in DevTools" round-trip for caption-detection bugs.
+
+### Files changed this session
+
+- `extension/src/content/extractors/UdemyExtractor.ts` — ordered primary cue
+  selectors + `well-module--*` support
+- `extension/src/content/overlay/SubtitleOverlay.ts` — normalized position
+  persistence + `well-module--*` hide CSS
+- `extension/src/background/index.ts` — daemon translate SSE relay over port
+- `extension/src/content/index.ts` — `translateViaBackground`, snapshot builder,
+  `CAPTION_SNAPSHOT` handler, `__dualsubDebug.snapshot()`
+- `extension/src/popup/App.tsx` — Caption DOM Snapshot panel
+- `extension/src/shared/messaging.ts` — `CAPTION_SNAPSHOT`, `DaemonStreamCommand`
+  / `DaemonStreamEvent`, `CaptionSnapshot` / `CaptionCandidate`
+- `README.md`, `codebase.md`, `WIP.md` — documentation updates
+
+### Still open / not done
+- The Udemy `well-module--text--` fix is built but **not yet verified live** on
+  the affected lecture (rebuild + reload + F5, confirm overlay shows the cue and
+  the native caption is hidden).
+- Pre-existing gap (unchanged): `orchestrator.go` passes `""` as job summary on
+  `cache.UpdateJob`, so `/v1/jobs` `error_summary` stays empty.
+
+---
+
 ## Session 2026-05-12: icon refresh + popup state rehydration
 
 ### Issues fixed

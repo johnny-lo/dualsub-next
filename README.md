@@ -89,15 +89,20 @@ In Chrome, open `chrome://extensions/`, enable Developer Mode, click
 2. Make sure the player's subtitles are enabled.
 3. Click the DualSub Next toolbar icon.
 4. Pick a provider and click **Translate**. The bilingual overlay appears on
-   the player as chunks come back from the daemon. The full-transcript stream
-   runs in the content script, so it keeps translating if the popup closes.
+   the player as chunks come back from the daemon. The translate stream runs in
+   the background service worker, so it keeps translating if the popup closes.
 5. Toggle **Live mode** to translate cues on the fly without a full pass.
-6. Drag the bilingual overlay to reposition it; the overlay stays anchored by
-   its center point as subtitle line length changes.
+6. Drag the bilingual overlay to reposition it; the position is remembered
+   (stored as normalized coordinates) and stays stable across normal,
+   fullscreen, and resized windows.
 7. Use **Clear** in Recent Jobs to clear job history without deleting cached
    translations.
 8. **Extract & Copy** copies the original transcript to the clipboard as a
    fallback for pasting into a web LLM.
+9. If subtitles aren't detected (Udemy occasionally renames its caption DOM),
+   open the popup's **Caption DOM Snapshot (debug)** panel and click
+   **Dump caption DOM** to capture a diagnostic snapshot of the page's caption
+   elements.
 
 ## Development
 

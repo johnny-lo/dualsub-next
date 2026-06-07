@@ -3,18 +3,32 @@ import { parseVtt } from './parseVtt'
 import { cuesToEntries, waitForCues } from './textTrack'
 import { ExtractError, type ActiveCue, type CueObserver, type SubtitleExtractor } from './types'
 
-// Udemy renders the active caption text into a DOM element they own
-// (`well--text--<hash>`) instead of relying on the browser's TextTrack API,
-// at least for [CC] tracks. We combine a MutationObserver (sub-frame
-// reactivity when Udemy swaps the cue text) with a 300ms interval (catches
-// cases where the observer doesn't fire — e.g. textContent changes inside
-// nodes that are themselves replaced before MO sees them).
-const UDEMY_CUE_SELECTORS = [
+// Udemy renders the active caption text into a dedicated element it owns
+// instead of the browser's TextTrack API (for [CC] tracks). We combine a
+// MutationObserver (sub-frame reactivity when Udemy swaps the cue text) with a
+// 300ms interval (catches cases where the observer doesn't fire — e.g.
+// textContent changes inside nodes that are themselves replaced before MO sees
+// them).
+//
+// The exact element has drifted across Udemy versions: older builds rendered
+// into `[data-purpose="captions-cue-text"]` (class `well--text--<hash>`);
+// newer builds drop the data-purpose hook entirely and use the CSS-modules
+// name `well-module--text--<hash>`. PRIMARY selectors below are the dedicated
+// cue-text elements, newest first — when one exists we trust it exclusively
+// (empty text = no active cue) and never fall through to the broad fallback,
+// which can grab unrelated page text (language menu, course-progress labels).
+const UDEMY_PRIMARY_CUE_SELECTORS = [
   '[data-purpose="captions-cue-text"]',
+  '[class*="well-module--text--"]',
+  '[class*="well--text--"]',
+]
+
+const UDEMY_CUE_SELECTORS = [
+  ...UDEMY_PRIMARY_CUE_SELECTORS,
   '[data-purpose="captions-display"]',
   '[class*="captions-display--"]',
   '[class*="captions-cue--"]',
-  '[class*="well--text--"]',
+  '[class*="well-module--container--"]',
   '[class*="well--container--"]',
 ]
 
@@ -23,7 +37,9 @@ const UDEMY_NATIVE_CAPTION_SELECTORS = [
   '[data-purpose="captions-display"]',
   '[class*="captions-display--"]',
   '[class*="captions-cue--"]',
+  '[class*="well-module--text--"]',
   '[class*="well--text--"]',
+  '[class*="well-module--container--"]',
   '[class*="well--container--"]',
 ]
 
@@ -71,13 +87,15 @@ function isVisibleCaptionCandidate(el: HTMLElement): boolean {
 }
 
 function findUdemyCaptionText(): string {
-  // Prefer the exact cue-text element Udemy uses for rendering active captions.
-  // Skip visibility check — we may have hidden it ourselves via CSS.
-  // If the element exists, always trust it (return empty when no cue is active
-  // instead of falling through to broad selectors that pick up unrelated text).
-  const cueText = document.querySelector<HTMLElement>('[data-purpose="captions-cue-text"]')
-  if (cueText) {
-    const text = cueText.textContent?.trim() ?? ''
+  // Prefer the dedicated cue-text element Udemy renders active captions into.
+  // Skip the visibility check — we may have hidden it ourselves via CSS.
+  // If a primary element exists, always trust it (return empty when no cue is
+  // active instead of falling through to broad selectors that pick up
+  // unrelated text like the language menu or course-progress labels).
+  for (const selector of UDEMY_PRIMARY_CUE_SELECTORS) {
+    const el = document.querySelector<HTMLElement>(selector)
+    if (!el) continue
+    const text = el.textContent?.trim() ?? ''
     return text.length <= 400 ? text : ''
   }
 
@@ -88,11 +106,11 @@ function findUdemyCaptionText(): string {
 
   const visible = candidates.filter(isVisibleCaptionCandidate)
   visible.sort((a, b) => {
-    const cls = (el: HTMLElement) => el.getAttribute('class') ?? ''
-    const aCue = cls(a).includes('captions-display--') || cls(a).includes('well--') ? 1 : 0
-    const bCue = cls(b).includes('captions-display--') || cls(b).includes('well--') ? 1 : 0
-    if (aCue !== bCue) return bCue - aCue
-    return 0
+    const isCue = (el: HTMLElement) => {
+      const cls = el.getAttribute('class') ?? ''
+      return cls.includes('captions-display--') || /well(-module)?--/.test(cls) ? 1 : 0
+    }
+    return isCue(b) - isCue(a)
   })
 
   return visible[0]?.textContent?.trim() ?? ''

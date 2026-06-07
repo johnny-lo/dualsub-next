@@ -1,10 +1,14 @@
 import { detectSite } from './extractors'
 import { ExtractError, type ActiveCue } from './extractors/types'
 import { SubtitleOverlay } from './overlay/SubtitleOverlay'
-import { DaemonClient } from '@/shared/DaemonClient'
+import type { TranslateHandlers, TranslateRequest } from '@/shared/DaemonClient'
 import { normalizeText } from '@/shared/transcript'
 import type {
+  CaptionCandidate,
+  CaptionSnapshot,
   ContentMessage,
+  DaemonStreamCommand,
+  DaemonStreamEvent,
   ExtractTranscriptResponse,
   OverlayStatus,
   SimpleAck,
@@ -24,7 +28,68 @@ let liveMode = false
 let liveProvider = ''
 let liveTargetLang = '繁體中文'
 const inflightLive = new Set<string>()
-const daemon = new DaemonClient()
+const TRANSLATE_PORT = 'dualsub-daemon-translate'
+
+function translateViaBackground(
+  request: TranslateRequest,
+  handlers: TranslateHandlers,
+): () => void {
+  const port = chrome.runtime.connect({ name: TRANSLATE_PORT })
+  let terminal = false
+  const heartbeat = window.setInterval(() => {
+    if (!terminal) port.postMessage({ type: 'ping' } satisfies DaemonStreamCommand)
+  }, 20_000)
+
+  const finish = () => {
+    if (terminal) return false
+    terminal = true
+    window.clearInterval(heartbeat)
+    return true
+  }
+
+  port.onMessage.addListener((raw: unknown) => {
+    const event = raw as DaemonStreamEvent
+    switch (event.type) {
+      case 'job-created':
+        handlers.onJobCreated?.(event.payload)
+        break
+      case 'chunk-done':
+        handlers.onChunkDone?.(event.payload)
+        break
+      case 'chunk-error':
+        handlers.onChunkError?.(event.payload)
+        break
+      case 'done':
+        if (!finish()) return
+        handlers.onDone?.(event.payload)
+        port.disconnect()
+        break
+      case 'fatal':
+        if (!finish()) return
+        handlers.onFatal?.(new Error(event.message))
+        port.disconnect()
+        break
+    }
+  })
+
+  port.onDisconnect.addListener(() => {
+    if (!finish()) return
+    handlers.onFatal?.(
+      new Error(chrome.runtime.lastError?.message ?? 'Daemon stream connection closed'),
+    )
+  })
+
+  port.postMessage({ type: 'start', request } satisfies DaemonStreamCommand)
+
+  return () => {
+    if (!finish()) return
+    try {
+      port.postMessage({ type: 'cancel' } satisfies DaemonStreamCommand)
+    } finally {
+      port.disconnect()
+    }
+  }
+}
 
 // "Sticky" full-pass translate config — set when the user clicks Translate
 // (popup sends SET_OVERLAY with autoTranslate). Persists across SPA lecture
@@ -171,7 +236,7 @@ async function showOverlayForCurrentVideo(): Promise<SimpleAck> {
 function startFullTranscriptTranslate(
   videoKey: string,
   entries: Array<{ index: number; originalText: string }>,
-  request: Parameters<DaemonClient['translate']>[0],
+  request: TranslateRequest,
 ) {
   currentVideoKey = videoKey
   ensureOverlay().setTranslations({})
@@ -197,7 +262,7 @@ function startFullTranscriptTranslate(
   for (const e of entries) byIndex.set(e.index, e.originalText)
 
   fullTranslateAbort?.()
-  fullTranslateAbort = daemon.translate(request, {
+  fullTranslateAbort = translateViaBackground(request, {
     onJobCreated: (info) => {
       if (!isCurrentFullTranslate(videoKey)) return
       setFullTranslateStatus({
@@ -333,7 +398,7 @@ function handleCue(cue: ActiveCue | null) {
     inflightLive.add(text)
     const captured = text
     const currentTexts = cue.texts
-    daemon.translate(
+    translateViaBackground(
       {
         site: extractor.site,
         video_key: extractor.videoKey(),
@@ -484,14 +549,153 @@ chrome.runtime.onMessage.addListener(
       return false
     }
 
+    if (msg.type === 'CAPTION_SNAPSHOT') {
+      sendResponse(buildCaptionSnapshot())
+      return false
+    }
+
     return false
   },
 )
+
+// ─── caption DOM snapshot (debug) ───────────────────────────────────────
+// One-shot diagnostic probe driven by the popup's "Dump caption DOM" button.
+// When live caption detection fails (real captions render in an element no
+// known selector matches), this captures every plausible caption surface so
+// we can see exactly where the text lives and add a precise selector.
+// Broad on purpose — diagnostic only; never feeds live caption selection.
+const SNAPSHOT_PROBE_SELECTORS = [
+  '[data-purpose="captions-cue-text"]',
+  '[data-purpose="captions-display"]',
+  '[data-purpose*="caption"]',
+  '[data-purpose*="subtitle"]',
+  '[class*="captions-display--"]',
+  '[class*="captions-cue--"]',
+  '[class*="well--text--"]',
+  '[class*="well--container--"]',
+  '[class*="caption"]',
+  '[class*="subtitle"]',
+  '[aria-live="polite"]',
+  '[aria-live="assertive"]',
+  '[role="status"]',
+  '.player-timedtext',
+  '.player-timedtext-text-container',
+]
+
+const SNAPSHOT_CANDIDATE_CAP = 60
+
+function rectOverlapsVideo(rect: DOMRect, videoRect: DOMRect | null): boolean {
+  if (!videoRect || videoRect.width === 0 || videoRect.height === 0) return false
+  const cx = rect.left + rect.width / 2
+  const cy = rect.top + rect.height / 2
+  return cx >= videoRect.left && cx <= videoRect.right && cy >= videoRect.top && cy <= videoRect.bottom
+}
+
+function describeCandidate(
+  el: HTMLElement,
+  videoRect: DOMRect | null,
+  source: CaptionCandidate['source'],
+): CaptionCandidate {
+  const rect = el.getBoundingClientRect()
+  const style = window.getComputedStyle(el)
+  const dataAttrs: Record<string, string> = {}
+  const ariaAttrs: Record<string, string> = {}
+  for (const attr of Array.from(el.attributes)) {
+    if (attr.name.startsWith('data-')) dataAttrs[attr.name] = attr.value
+    else if (attr.name.startsWith('aria-')) ariaAttrs[attr.name] = attr.value
+  }
+  return {
+    source,
+    tag: el.tagName.toLowerCase(),
+    id: el.id || '',
+    className: typeof el.className === 'string' ? el.className : '',
+    role: el.getAttribute('role'),
+    dataAttrs,
+    ariaAttrs,
+    rect: {
+      x: Math.round(rect.x),
+      y: Math.round(rect.y),
+      w: Math.round(rect.width),
+      h: Math.round(rect.height),
+    },
+    overlapsVideo: rectOverlapsVideo(rect, videoRect),
+    display: style.display,
+    visibility: style.visibility,
+    opacity: style.opacity,
+    childCount: el.childElementCount,
+    matchesAuthoritative: el.matches('[data-purpose="captions-cue-text"]'),
+    text: (el.textContent ?? '').trim().replace(/\s+/g, ' ').slice(0, 300),
+  }
+}
+
+function buildCaptionSnapshot(): CaptionSnapshot {
+  const video = document.querySelector('video')
+  const videoRect = video?.getBoundingClientRect() ?? null
+  const seen = new Set<HTMLElement>()
+  const candidates: CaptionCandidate[] = []
+
+  // Pass 1: known + broad caption-ish selectors.
+  for (const selector of SNAPSHOT_PROBE_SELECTORS) {
+    for (const el of document.querySelectorAll<HTMLElement>(selector)) {
+      if (seen.has(el) || candidates.length >= SNAPSHOT_CANDIDATE_CAP) break
+      seen.add(el)
+      candidates.push(describeCandidate(el, videoRect, 'selector'))
+    }
+  }
+
+  // Pass 2: text leaves sitting over the lower video area that matched no
+  // selector — the stuck case. Skipped when there's no usable video rect.
+  if (videoRect && videoRect.width > 0 && videoRect.height > 0) {
+    for (const el of document.querySelectorAll<HTMLElement>('body *')) {
+      if (candidates.length >= SNAPSHOT_CANDIDATE_CAP) break
+      if (seen.has(el) || el.childElementCount !== 0) continue
+      const text = el.textContent?.trim() ?? ''
+      if (text.length < 1 || text.length > 200) continue
+      const rect = el.getBoundingClientRect()
+      if (rect.width === 0 || rect.height === 0) continue
+      const cx = rect.left + rect.width / 2
+      const cy = rect.top + rect.height / 2
+      const inLowerVideo =
+        cx >= videoRect.left &&
+        cx <= videoRect.right &&
+        cy >= videoRect.top + videoRect.height * 0.4 &&
+        cy <= videoRect.bottom + videoRect.height * 0.15
+      if (!inLowerVideo) continue
+      seen.add(el)
+      candidates.push(describeCandidate(el, videoRect, 'lower-video-leaf'))
+    }
+  }
+
+  const authoritative = document.querySelector<HTMLElement>('[data-purpose="captions-cue-text"]')
+  return {
+    ok: true,
+    url: location.href,
+    site: extractor?.site ?? 'unsupported',
+    videoKey: extractor?.videoKey() ?? null,
+    timestamp: Date.now(),
+    authoritativePresent: authoritative !== null,
+    authoritativeText: authoritative?.textContent?.trim() ?? null,
+    video: videoRect
+      ? {
+          rect: {
+            x: Math.round(videoRect.x),
+            y: Math.round(videoRect.y),
+            w: Math.round(videoRect.width),
+            h: Math.round(videoRect.height),
+          },
+          readyState: video?.readyState ?? -1,
+          textTracks: video?.textTracks.length ?? 0,
+        }
+      : null,
+    candidates,
+  }
+}
 
 // Debug helper — accessible in DevTools after switching the Console context
 // dropdown from "top" to the DualSub Next content-script context. Use:
 //   __dualsubDebug.diag()      → cue text, sample keys, lookup result
 //   __dualsubDebug.dumpAll()   → full translation map (large)
+//   __dualsubDebug.snapshot()  → caption DOM snapshot (same as popup button)
 //
 // Assign to BOTH window and globalThis: in CRXJS-loaded content scripts the
 // isolated-world `window` binding is sometimes a Proxy that drops dynamically
@@ -520,6 +724,9 @@ const debugApi = {
     return new Promise<unknown>((resolve) => {
       chrome.storage.local.get(['dualsubTranslationCache'], (data) => resolve(data))
     })
+  },
+  snapshot() {
+    return buildCaptionSnapshot()
   },
 }
 ;(globalThis as unknown as { __dualsubDebug: typeof debugApi }).__dualsubDebug = debugApi

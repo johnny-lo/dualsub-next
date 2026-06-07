@@ -15,6 +15,7 @@ import {
   Typography,
 } from 'antd'
 import {
+  BugOutlined,
   CheckOutlined,
   CopyOutlined,
   DeleteOutlined,
@@ -32,6 +33,7 @@ import {
 } from '@/shared/transcript'
 import {
   sendToActiveTab,
+  type CaptionSnapshot,
   type ContentMessage,
   type ExtractTranscriptResponse,
   type OverlayStatus,
@@ -165,6 +167,8 @@ export default function App() {
   const [installDir, setInstallDir] = useState<string | null>(null)
   const startCommand = useMemo(() => buildStartCommand(installDir), [installDir])
   const [copiedStart, setCopiedStart] = useState(false)
+  const [snapshot, setSnapshot] = useState('')
+  const [snapshotState, setSnapshotState] = useState<'idle' | 'working' | 'copied'>('idle')
 
   const refreshRecentJobs = async () => {
     setRecentJobs(await client.listJobs(5))
@@ -405,6 +409,31 @@ export default function App() {
   const onClearJobs = async () => {
     await client.clearJobs()
     setRecentJobs([])
+  }
+
+  const onDumpSnapshot = async () => {
+    setSnapshotState('working')
+    try {
+      const snap = await sendToActiveTab<CaptionSnapshot | null>({
+        type: 'CAPTION_SNAPSHOT',
+      } satisfies ContentMessage)
+      setSnapshot(JSON.stringify(snap, null, 2))
+    } catch (err) {
+      setSnapshot(`Error: ${(err as Error).message}`)
+    } finally {
+      setSnapshotState('idle')
+    }
+  }
+
+  const onCopySnapshot = async () => {
+    if (!snapshot) return
+    try {
+      await navigator.clipboard.writeText(snapshot)
+      setSnapshotState('copied')
+      setTimeout(() => setSnapshotState('idle'), 1500)
+    } catch (err) {
+      console.error('[DualSub] snapshot clipboard write failed:', err)
+    }
   }
 
   const onLiveModeToggle = async (enabled: boolean) => {
@@ -753,6 +782,48 @@ export default function App() {
                         type={pasteResult.ok ? 'success' : 'error'}
                         showIcon
                         message={pasteResult.message}
+                      />
+                    )}
+                  </Space>
+                ),
+              },
+            ]}
+          />
+
+          <Collapse
+            size="small"
+            items={[
+              {
+                key: 'diagnostics',
+                label: 'Caption DOM Snapshot (debug)',
+                children: (
+                  <Space direction="vertical" size="small" style={{ width: '100%' }}>
+                    <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                      字幕抓不到時按一下，擷取目前頁面的候選字幕元素，複製後貼給開發者診斷。
+                    </Typography.Text>
+                    <Space.Compact style={{ width: '100%' }}>
+                      <Button
+                        icon={<BugOutlined />}
+                        onClick={onDumpSnapshot}
+                        loading={snapshotState === 'working'}
+                        block
+                      >
+                        Dump caption DOM
+                      </Button>
+                      <Button
+                        icon={<CopyOutlined />}
+                        onClick={onCopySnapshot}
+                        disabled={!snapshot}
+                      >
+                        {snapshotState === 'copied' ? 'Copied' : 'Copy'}
+                      </Button>
+                    </Space.Compact>
+                    {snapshot && (
+                      <Input.TextArea
+                        readOnly
+                        rows={10}
+                        value={snapshot}
+                        style={{ fontFamily: 'monospace', fontSize: 11 }}
                       />
                     )}
                   </Space>
