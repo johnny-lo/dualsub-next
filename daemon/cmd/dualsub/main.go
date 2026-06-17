@@ -167,6 +167,11 @@ func buildProviders(cfg *config.Config) map[string]provider.Provider {
 			BaseURL: c.BaseURL, DefaultModel: c.DefaultModel,
 		})
 	}
+	if c := cfg.Providers.Codex; c != nil {
+		out["codex"] = provider.NewCodex(provider.CodexOptions{
+			Bin: c.Bin, Profile: c.Profile, Model: c.Model, Sandbox: c.Sandbox,
+		})
+	}
 	return out
 }
 
@@ -196,6 +201,12 @@ max_attempts = 3
 # [providers.ollama]
 # base_url = "http://127.0.0.1:11434"
 # default_model = "qwen2.5:7b"
+
+# [providers.codex]
+# bin = "codex"          # optional; default resolves "codex" on PATH
+# profile = ""           # optional; codex exec -p
+# model = ""             # optional; codex exec -m
+# sandbox = "read-only"  # optional; codex exec -s
 `
 
 func runConfig(args []string) error {
