@@ -72,3 +72,14 @@ func TestOllamaLive(t *testing.T) {
 	}
 	runLive(t, NewOllama(opts))
 }
+
+func TestCodexLive(t *testing.T) {
+	if os.Getenv("CODEX_TEST") == "" {
+		t.Skip("set CODEX_TEST=1 (and be logged in via `codex login`) to run")
+	}
+	opts := CodexOptions{}
+	if m := os.Getenv("CODEX_MODEL"); m != "" {
+		opts.Model = m
+	}
+	runLive(t, NewCodex(opts))
+}
