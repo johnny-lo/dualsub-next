@@ -37,6 +37,7 @@ type ProvidersConfig struct {
 	OpenAI *OpenAIProvider `toml:"openai" json:"openai,omitempty"`
 	Gemini *GeminiProvider `toml:"gemini" json:"gemini,omitempty"`
 	Ollama *OllamaProvider `toml:"ollama" json:"ollama,omitempty"`
+	Codex  *CodexProvider  `toml:"codex"  json:"codex,omitempty"`
 }
 
 type OpenAIProvider struct {
@@ -54,6 +55,13 @@ type GeminiProvider struct {
 type OllamaProvider struct {
 	BaseURL      string `toml:"base_url"      json:"base_url"`
 	DefaultModel string `toml:"default_model" json:"default_model"`
+}
+
+type CodexProvider struct {
+	Bin     string `toml:"bin"     json:"bin"`
+	Profile string `toml:"profile" json:"profile"`
+	Model   string `toml:"model"   json:"model"`
+	Sandbox string `toml:"sandbox" json:"sandbox"`
 }
 
 // DefaultPath returns ~/.config/dualsub/config.toml.
@@ -182,6 +190,9 @@ func (c *Config) EnabledProviders() []string {
 	}
 	if c.Providers.Ollama != nil {
 		out = append(out, "ollama") // no key required
+	}
+	if c.Providers.Codex != nil {
+		out = append(out, "codex") // no key required; auth via `codex login`
 	}
 	return out
 }

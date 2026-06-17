@@ -73,6 +73,34 @@ func TestEnabledProviders(t *testing.T) {
 	}
 }
 
+func TestCodexConfigRoundTripAndEnabled(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.toml")
+
+	in := &Config{}
+	in.Providers.Codex = &CodexProvider{
+		Bin: "codex", Profile: "work", Model: "gpt-5", Sandbox: "read-only",
+	}
+	if err := in.Save(path); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+	out, err := Load(path)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if out.Providers.Codex == nil || out.Providers.Codex.Profile != "work" || out.Providers.Codex.Model != "gpt-5" {
+		t.Errorf("codex config lost: %+v", out.Providers.Codex)
+	}
+
+	// EnabledProviders: present block → enabled, no key required (like ollama).
+	c := &Config{}
+	c.Providers.Codex = &CodexProvider{}
+	got := c.EnabledProviders()
+	if len(got) != 1 || got[0] != "codex" {
+		t.Errorf("expected [codex], got %v", got)
+	}
+}
+
 func TestApplyEnvOverrides(t *testing.T) {
 	t.Setenv("OPENAI_API_KEY", "env-openai")
 	t.Setenv("GEMINI_API_KEY", "env-gemini")
