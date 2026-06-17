@@ -72,7 +72,14 @@ export default function App() {
     try {
       const values = await form.validateFields()
       // Merge with existing config so we preserve fields the form does not surface.
-      const merged = { ...(config ?? {}), ...values } as DaemonConfig
+      // `providers` needs a nested merge: the form only surfaces gemini/openai/
+      // ollama, so a shallow spread would drop unsurfaced providers like
+      // [providers.codex] (configured via TOML, no settings UI).
+      const merged = {
+        ...(config ?? {}),
+        ...values,
+        providers: { ...(config?.providers ?? {}), ...(values.providers ?? {}) },
+      } as DaemonConfig
       await client.putConfig(merged)
       setSaveState({
         state: 'saved',
