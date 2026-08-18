@@ -54,7 +54,11 @@ func newTestServer(t *testing.T) *testServerCtx {
 	cfg := &config.Config{}
 	cfg.Server.Listen = "127.0.0.1:7878"
 	cfg.Translate.ChunkSize = 30
+	cfg.Sync.Token = "existing-sync-secret"
 	cfgPath := filepath.Join(t.TempDir(), "config.toml")
+	if err := cfg.Save(cfgPath); err != nil {
+		t.Fatalf("save initial config: %v", err)
+	}
 
 	s := New(Options{
 		Orchestrator: orch,
@@ -356,6 +360,9 @@ func TestConfigGetPut(t *testing.T) {
 	}
 	if loaded.Providers.Gemini == nil || loaded.Providers.Gemini.APIKey != "newkey" {
 		t.Errorf("gemini key not persisted: %+v", loaded.Providers.Gemini)
+	}
+	if loaded.Sync.Token != "existing-sync-secret" {
+		t.Errorf("sync token was lost during JSON config update: %q", loaded.Sync.Token)
 	}
 }
 

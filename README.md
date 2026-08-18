@@ -72,6 +72,57 @@ For a user-level systemd service:
 
 Logs are written under `${XDG_STATE_HOME:-~/.local/state}/dualsub/`.
 
+### Share translations across a Tailscale network
+
+Every browser continues to use its local daemon at `127.0.0.1:7878`. The local
+SQLite cache is checked first; only cache misses go to the always-on node. If
+that node cannot be reached quickly, translation falls back to the local
+provider and the result is queued in SQLite for automatic upload later.
+
+Generate one long token file on the central node, then securely copy that same
+file to each participating machine:
+
+```bash
+install -d -m 700 ~/.config/dualsub
+openssl rand -hex -out ~/.config/dualsub/sync.token 32
+chmod 600 ~/.config/dualsub/sync.token
+```
+
+On the always-on node, bind the dedicated shared-cache listener to that node's
+Tailscale IP. Do not bind it to `0.0.0.0`:
+
+```toml
+[sync]
+listen = "100.108.126.11:7879"
+token_file = "~/.config/dualsub/sync.token"
+```
+
+On each client node:
+
+```toml
+[sync]
+central_url = "http://ubuntu-dev:7879"
+token_file = "~/.config/dualsub/sync.token"
+connect_timeout_ms = 800
+request_timeout_seconds = 360
+interval_seconds = 30
+```
+
+The central listener exposes only authenticated cache resolve/import endpoints;
+the browser-facing config and job APIs remain localhost-only. Each client must
+still configure its own provider so it can translate while the central node is
+offline. `DUALSUB_SYNC_TOKEN` can be used instead of storing the token in TOML.
+
+The same configuration can be applied without hand-editing TOML:
+
+```bash
+# central node
+dualsub config sync --listen 100.108.126.11:7879 --token-file ~/.config/dualsub/sync.token
+
+# client node
+dualsub config sync --central-url http://ubuntu-dev:7879 --token-file ~/.config/dualsub/sync.token
+```
+
 ### 2. Load the extension
 
 ```bash
@@ -130,6 +181,15 @@ cd extension && npm run build
 | DELETE | `/v1/jobs`           | clear job history only; keeps translation cache |
 | GET    | `/v1/config`         | current daemon config                          |
 | PUT    | `/v1/config`         | persist config to TOML (restart to apply)      |
+
+The optional shared-cache listener uses a separate address and requires
+`Authorization: Bearer <sync token>` on every request:
+
+| Method | Path          | Notes                                             |
+|--------|---------------|---------------------------------------------------|
+| GET    | `/healthz`    | authenticated shared-listener liveness             |
+| POST   | `/v1/resolve` | resolve from central cache or translate centrally |
+| POST   | `/v1/import`  | idempotently import offline local translations    |
 
 ## Acknowledgements
 

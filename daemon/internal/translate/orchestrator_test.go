@@ -15,8 +15,9 @@ import (
 // ─── mock provider ──────────────────────────────────────────────────────────
 
 type mockResponse struct {
-	err   error
-	lines []provider.TranslatedLine
+	err          error
+	lines        []provider.TranslatedLine
+	queueForSync bool
 }
 
 type mockProvider struct {
@@ -49,7 +50,7 @@ func (m *mockProvider) Translate(_ context.Context, in provider.Request) (provid
 	if r.err != nil {
 		return provider.Response{}, r.err
 	}
-	return provider.Response{Lines: r.lines}, nil
+	return provider.Response{Lines: r.lines, QueueForSync: r.queueForSync}, nil
 }
 
 // ─── helpers ────────────────────────────────────────────────────────────────
@@ -521,6 +522,7 @@ func TestPartialSuccess(t *testing.T) {
 func TestCanceledJobIsNotLeftRunning(t *testing.T) {
 	lines := mkLines(60)
 	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 	m := &mockProvider{name: "mock", block: make(chan struct{}), queue: []mockResponse{
 		{lines: translatedFor(lines[:30])},
 		{lines: translatedFor(lines[30:])},
@@ -581,5 +583,28 @@ func TestUnknownProvider(t *testing.T) {
 	}, out)
 	if err == nil {
 		t.Fatal("expected setup error")
+	}
+}
+
+func TestLocalFallbackIsQueuedForSync(t *testing.T) {
+	lines := mkLines(2)
+	m := &mockProvider{name: "mock", defaultModel: "mock-model", queue: []mockResponse{{
+		lines: translatedFor(lines), queueForSync: true,
+	}}}
+	o, c := newOrch(t, m)
+	events := collect(t, func(out chan<- Event) error {
+		return o.Translate(context.Background(), Input{
+			VideoKey: "v1", Provider: "mock", SourceLang: "en", TargetLang: "zh-TW", Lines: lines,
+		}, out)
+	})
+	if countByType(events, EventChunkDone) != 1 {
+		t.Fatalf("translation did not complete: %+v", events)
+	}
+	pending, err := c.PendingSyncEntries(context.Background(), 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pending) != len(lines) {
+		t.Fatalf("pending sync entries = %d, want %d", len(pending), len(lines))
 	}
 }

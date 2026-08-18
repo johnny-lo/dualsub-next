@@ -16,6 +16,7 @@ type Config struct {
 	Server    ServerConfig    `toml:"server"    json:"server"`
 	Translate TranslateConfig `toml:"translate" json:"translate"`
 	Cache     CacheConfig     `toml:"cache"     json:"cache"`
+	Sync      SyncConfig      `toml:"sync"      json:"sync"`
 	Providers ProvidersConfig `toml:"providers" json:"providers"`
 }
 
@@ -31,6 +32,19 @@ type TranslateConfig struct {
 
 type CacheConfig struct {
 	Path string `toml:"path" json:"path"`
+}
+
+// SyncConfig enables local-first sharing without exposing the browser-facing
+// daemon API to the tailnet. A central node sets Listen; client nodes set
+// CentralURL. Token is deliberately omitted from JSON config responses.
+type SyncConfig struct {
+	Listen                string `toml:"listen"                  json:"listen"`
+	CentralURL            string `toml:"central_url"             json:"central_url"`
+	Token                 string `toml:"token"                   json:"-"`
+	TokenFile             string `toml:"token_file"              json:"token_file"`
+	ConnectTimeoutMS      int    `toml:"connect_timeout_ms"      json:"connect_timeout_ms"`
+	RequestTimeoutSeconds int    `toml:"request_timeout_seconds" json:"request_timeout_seconds"`
+	IntervalSeconds       int    `toml:"interval_seconds"        json:"interval_seconds"`
 }
 
 type ProvidersConfig struct {
@@ -121,6 +135,7 @@ func (c *Config) ApplyEnvOverrides() {
 	if c.Server.Listen == "" {
 		setIfEmpty(&c.Server.Listen, "DUALSUB_LISTEN")
 	}
+	setIfEmpty(&c.Sync.Token, "DUALSUB_SYNC_TOKEN")
 }
 
 // Defaults fills in sensible defaults for any unset fields and expands ~ in paths.
@@ -143,6 +158,35 @@ func (c *Config) Defaults() {
 	} else {
 		c.Cache.Path = expandUser(c.Cache.Path)
 	}
+	if c.Sync.ConnectTimeoutMS == 0 {
+		c.Sync.ConnectTimeoutMS = 800
+	}
+	if c.Sync.RequestTimeoutSeconds == 0 {
+		c.Sync.RequestTimeoutSeconds = 360
+	}
+	if c.Sync.IntervalSeconds == 0 {
+		c.Sync.IntervalSeconds = 30
+	}
+	if c.Sync.TokenFile != "" {
+		c.Sync.TokenFile = expandUser(c.Sync.TokenFile)
+	}
+}
+
+// LoadSyncToken reads the shared-cache secret after environment overrides.
+// An explicit token wins; token_file is primarily useful for service installs.
+func (c *Config) LoadSyncToken() error {
+	if c.Sync.Token != "" || c.Sync.TokenFile == "" {
+		return nil
+	}
+	data, err := os.ReadFile(c.Sync.TokenFile)
+	if err != nil {
+		return fmt.Errorf("read sync token file: %w", err)
+	}
+	c.Sync.Token = strings.TrimSpace(string(data))
+	if c.Sync.Token == "" {
+		return errors.New("sync token file is empty")
+	}
+	return nil
 }
 
 func expandUser(p string) string {

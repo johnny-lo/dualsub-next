@@ -262,7 +262,7 @@ func (o *Orchestrator) runChunk(
 		}
 		res, err := prov.Translate(ctx, req)
 		if err == nil {
-			if err := o.persistChunk(ctx, in, model, prov.Name(), chunk, res.Lines); err != nil && ctx.Err() == nil {
+			if err := o.persistChunk(ctx, in, model, prov.Name(), chunk, res.Lines, res.QueueForSync); err != nil && ctx.Err() == nil {
 				out <- Event{Type: EventChunkError, Payload: ChunkErrorPayload{
 					Chunk: chunkNum, Code: codeCacheStoreFail,
 					Message:   "translation succeeded but cache write failed: " + err.Error(),
@@ -311,6 +311,7 @@ func (o *Orchestrator) persistChunk(
 	provName string,
 	originals []provider.Line,
 	translated []provider.TranslatedLine,
+	queueForSync bool,
 ) error {
 	byIdx := make(map[int]string, len(translated))
 	for _, t := range translated {
@@ -331,6 +332,9 @@ func (o *Orchestrator) persistChunk(
 			OriginalText:   l.Text,
 			TranslatedText: text,
 		})
+	}
+	if queueForSync {
+		return o.cache.StoreTranslationsForSync(ctx, entries)
 	}
 	return o.cache.StoreTranslations(ctx, entries)
 }

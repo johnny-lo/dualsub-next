@@ -27,8 +27,9 @@ type Line struct {
 }
 
 type Response struct {
-	Lines []TranslatedLine
-	Raw   string // raw model output, kept for debugging
+	Lines        []TranslatedLine
+	Raw          string // raw model output, kept for debugging
+	QueueForSync bool   // translated locally after the shared cache was unavailable
 }
 
 type TranslatedLine struct {

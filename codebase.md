@@ -24,7 +24,9 @@ thin client. Anything that can be moved to Go has been; the extension owns
 only what JavaScript-in-the-browser uniquely can do.
 
 Communication: HTTP (JSON) for one-shot, SSE for the chunked translate stream.
-No auth, no TLS — localhost-only single-user.
+The browser-facing listener has no auth and therefore remains localhost-only.
+The optional Tailscale shared-cache listener is separate, has only resolve,
+import, and health routes, and requires a bearer token on every request.
 
 ## 2. Data flow
 
@@ -44,7 +46,9 @@ No auth, no TLS — localhost-only single-user.
 [Orchestrator: daemon/internal/translate/]
    ├─ cache lookup (line-granular, cache.Key())
    ├─ chunk into N-line batches (default 30)
-   └─ worker pool (default 3) → provider.Translate()
+   └─ worker pool (default 3)
+          ├─ shared-cache resolve (when configured)
+          └─ unavailable → local provider.Translate() + sync_outbox
                                      │ HTTP to vendor (OpenAI / Gemini / Ollama)
                                      ▼
                                 ParseResponse → cache.StoreTranslations
@@ -72,11 +76,12 @@ popup teardown and MV3 content-script churn.
 |---|---|
 | `cmd/dualsub/main.go` | Entry. Subcommands: `serve`, `config init`, `version`. Owns wiring: load config → build providers map → make orchestrator → start HTTP server + logger. `buildProviders()` is the single registration point for provider impls. |
 | `internal/config/config.go` | TOML load + env-var overrides + defaults + `~` expansion. `Save()` does atomic-rename TOML write. **Both `toml:` and `json:` tags required** on every field — TOML is on disk, JSON is the API. |
-| `internal/cache/cache.go` | SQLite (`modernc.org/sqlite`, pure Go). Three tables: `translations`, `transcripts`, `jobs`. `Key()` is the canonical cache-key derivation. `:memory:` accepted for tests. `SetMaxOpenConns(1)` is intentional (see §7). |
+| `internal/cache/cache.go` | SQLite (`modernc.org/sqlite`, pure Go). Four tables: `translations`, `transcripts`, `jobs`, `sync_outbox`. Local fallback results and outbox keys are written atomically. `Key()` is the canonical cache-key derivation. `:memory:` accepted for tests. `SetMaxOpenConns(1)` is intentional (see §7). |
 | `internal/logger/logger.go` | JSONL append-only with mutex. `New("")` writes only to stderr. No rotation; user wipes manually. |
 | `internal/provider/` | LLM adapters. `provider.go` = interface + types + `Error` + error codes. `http.go` = shared client + status→code mapping (`mapStatus`). `prompt.go` = `BuildPrompt` + `ParseResponse`. `openai.go`, `gemini.go`, `ollama.go`, `claude.go` (stub). |
 | `internal/translate/` | Orchestrator. `event.go` = typed events. `orchestrator.go` = chunking + worker pool + retry-with-backoff + cache writes. Translation runs the worker pool; `Translate(ctx, in, events chan<- Event)` closes `events` itself. |
 | `internal/server/` | HTTP routes + SSE writer + CORS. `server.go` constructs and exposes `ListenAndServe`. `handlers.go` has all route handlers. `sse.go` is the SSE writer. |
+| `internal/sharedcache/` | Tailscale-oriented local-first sharing. Authenticated central resolve/import server, circuit-breaking client/provider wrapper, exact-batch in-flight coalescing, and the background outbox uploader. It never exposes daemon config or API keys. |
 
 ### extension/
 
@@ -175,13 +180,16 @@ only for paths that need an async `sendResponse` (currently
 
 ### 4.6 Provider config — TOML AND JSON
 
-Every field in `internal/config/config.go` carries both tags:
+Every non-secret field in `internal/config/config.go` carries both tags:
 
 ```go
 ChunkSize int `toml:"chunk_size" json:"chunk_size"`
 ```
 
 Drop one and you'll silently break either disk persistence or the HTTP API.
+`SyncConfig.Token` is the deliberate exception: it uses `json:"-"`, and the
+config PUT handler preserves only a token already stored on disk. An
+environment- or `token_file`-provided secret is never returned or persisted.
 
 ### 4.7 Content ↔ service-worker translate relay
 
@@ -212,11 +220,9 @@ Invariants that bite if you forget:
 - **Errors**: provider errors are typed (`*provider.Error`); HTTP handlers
   return JSON or plain text via `http.Error`. Orchestrator splits errors:
   setup errors return from `Translate()`; runtime failures are events.
-- **Tests**: `:memory:` SQLite + mock provider for orchestrator.
-  `httptest.NewServer` + mock provider for HTTP routes. Live API tests are
-  gated by `//go:build integration` and `*_API_KEY` env vars. **38 tests
-  total** across daemon (cache 7 + config 5 + logger 2 + provider 7 + server
-  7 + translate 10).
+- **Tests**: `:memory:` SQLite + mock provider for orchestrator and shared
+  cache. `httptest.NewServer` + mock provider for HTTP routes. Live API tests
+  are gated by `//go:build integration` and `*_API_KEY` env vars.
 - **Concurrency**: SQLite uses `SetMaxOpenConns(1)`; do not parallelise
   writes. Orchestrator parallelism is `Config.Concurrency` (default 3).
   Provider HTTP timeout is 90s default; 5min for Ollama (cold model load).
@@ -283,6 +289,12 @@ There is no migration story. Either:
   through who calls what.
 - **modernc.org/sqlite single-conn**: `SetMaxOpenConns(1)` is intentional;
   otherwise you'll see `database is locked` under any concurrency.
+- **Never file-sync `cache.db`**: WAL uses `cache.db`, `cache.db-wal`, and
+  `cache.db-shm` as one transactional unit. Multi-writer sharing is performed
+  only through `internal/sharedcache` at translation-row granularity.
+- **Shared listener binding**: bind `sync.listen` to the central node's
+  Tailscale IP, never `0.0.0.0`. Clients use MagicDNS in `sync.central_url`.
+  Every shared request requires the common sync token.
 - **Gemini API key in URL**: traditional Gemini auth puts the key in the
   query string, not a header (see `gemini.go`). Be careful logging request
   URLs — they leak the key.
@@ -398,7 +410,6 @@ These are decisions, not omissions. Each was discussed with the user.
 ```bash
 # daemon: vet + all tests
 cd daemon && go vet ./... && go test ./...
-# expect: 38 tests across cache(7) config(5) logger(2) provider(7) server(7) translate(10)
 
 # daemon: live integration (real keys; auto-skipped without env)
 GEMINI_API_KEY=...   go test -tags=integration ./internal/provider/ -run TestGeminiLive -v

@@ -1,8 +1,10 @@
 package config
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -26,6 +28,10 @@ func TestSaveLoadRoundTrip(t *testing.T) {
 	in.Translate.Concurrency = 4
 	in.Translate.MaxAttempts = 5
 	in.Cache.Path = "/tmp/test.db"
+	in.Sync = SyncConfig{
+		CentralURL: "http://ubuntu-dev:7879", Token: "sync-secret", TokenFile: "/tmp/sync.token",
+		ConnectTimeoutMS: 500, RequestTimeoutSeconds: 120, IntervalSeconds: 20,
+	}
 	in.Providers.Gemini = &GeminiProvider{
 		APIKey: "abc", BaseURL: "https://example.com", DefaultModel: "gemini-2.5-flash",
 	}
@@ -50,6 +56,9 @@ func TestSaveLoadRoundTrip(t *testing.T) {
 	}
 	if out.Providers.Ollama == nil || out.Providers.Ollama.BaseURL != "http://localhost:11434" {
 		t.Errorf("ollama config lost: %+v", out.Providers.Ollama)
+	}
+	if out.Sync != in.Sync {
+		t.Errorf("sync config lost: %+v vs %+v", out.Sync, in.Sync)
 	}
 }
 
@@ -104,6 +113,7 @@ func TestCodexConfigRoundTripAndEnabled(t *testing.T) {
 func TestApplyEnvOverrides(t *testing.T) {
 	t.Setenv("OPENAI_API_KEY", "env-openai")
 	t.Setenv("GEMINI_API_KEY", "env-gemini")
+	t.Setenv("DUALSUB_SYNC_TOKEN", "env-sync")
 
 	c := &Config{}
 	c.ApplyEnvOverrides()
@@ -113,6 +123,9 @@ func TestApplyEnvOverrides(t *testing.T) {
 	}
 	if c.Providers.Gemini == nil || c.Providers.Gemini.APIKey != "env-gemini" {
 		t.Errorf("gemini key not applied: %+v", c.Providers.Gemini)
+	}
+	if c.Sync.Token != "env-sync" {
+		t.Errorf("sync token not applied: %q", c.Sync.Token)
 	}
 }
 
@@ -126,8 +139,35 @@ func TestDefaultsAndExpand(t *testing.T) {
 	if c.Translate.ChunkSize != 30 {
 		t.Errorf("chunk_size default lost: %d", c.Translate.ChunkSize)
 	}
+	if c.Sync.ConnectTimeoutMS != 800 || c.Sync.RequestTimeoutSeconds != 360 || c.Sync.IntervalSeconds != 30 {
+		t.Errorf("sync defaults lost: %+v", c.Sync)
+	}
 	home, _ := os.UserHomeDir()
 	if c.Cache.Path != filepath.Join(home, "test/cache.db") {
 		t.Errorf("expand ~ failed: %q", c.Cache.Path)
+	}
+}
+
+func TestSyncTokenOmittedFromJSON(t *testing.T) {
+	data, err := json.Marshal(Config{Sync: SyncConfig{CentralURL: "http://central:7879", Token: "secret"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) == "" || strings.Contains(string(data), "secret") || strings.Contains(string(data), `"token":`) {
+		t.Fatalf("sync token leaked in JSON: %s", data)
+	}
+}
+
+func TestLoadSyncTokenFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "sync.token")
+	if err := os.WriteFile(path, []byte("  file-secret\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	c := &Config{Sync: SyncConfig{TokenFile: path}}
+	if err := c.LoadSyncToken(); err != nil {
+		t.Fatal(err)
+	}
+	if c.Sync.Token != "file-secret" {
+		t.Fatalf("token = %q", c.Sync.Token)
 	}
 }

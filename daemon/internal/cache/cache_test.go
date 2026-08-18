@@ -239,3 +239,38 @@ func TestClearJobsOnly(t *testing.T) {
 		t.Errorf("clear jobs changed the wrong tables: %+v", s)
 	}
 }
+
+func TestSyncOutboxLifecycle(t *testing.T) {
+	ctx := context.Background()
+	c := newTestCache(t)
+	entry := TranslationEntry{
+		Provider: "gemini", Model: "flash", SourceLang: "en", TargetLang: "zh-TW",
+		OriginalText: "Hello", TranslatedText: "你好",
+	}
+	entry.Key = Key(entry.Provider, entry.Model, entry.SourceLang, entry.TargetLang, entry.OriginalText)
+
+	if err := c.StoreTranslationsForSync(ctx, []TranslationEntry{entry}); err != nil {
+		t.Fatal(err)
+	}
+	pending, err := c.PendingSyncEntries(ctx, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pending) != 1 || pending[0] != entry {
+		t.Fatalf("pending = %+v, want %+v", pending, entry)
+	}
+	if err := c.AcknowledgeSyncEntries(ctx, []string{entry.Key}); err != nil {
+		t.Fatal(err)
+	}
+	count, err := c.PendingSyncCount(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if count != 0 {
+		t.Fatalf("pending count = %d, want 0", count)
+	}
+	hits, err := c.LookupTranslations(ctx, []string{entry.Key})
+	if err != nil || hits[entry.Key] != entry.TranslatedText {
+		t.Fatalf("acknowledging outbox removed translation: hits=%v err=%v", hits, err)
+	}
+}

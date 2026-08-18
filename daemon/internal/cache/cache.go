@@ -57,6 +57,12 @@ CREATE TABLE IF NOT EXISTS jobs (
 	created_at       INTEGER NOT NULL,
 	completed_at     INTEGER
 );
+
+CREATE TABLE IF NOT EXISTS sync_outbox (
+	cache_key TEXT PRIMARY KEY,
+	queued_at INTEGER NOT NULL,
+	FOREIGN KEY(cache_key) REFERENCES translations(cache_key) ON DELETE CASCADE
+);
 `
 
 // Open returns a Cache backed by the given SQLite path.
@@ -103,13 +109,13 @@ func normalize(s string) string {
 // ─── translations ───────────────────────────────────────────────────────────
 
 type TranslationEntry struct {
-	Key            string
-	Provider       string
-	Model          string
-	SourceLang     string
-	TargetLang     string
-	OriginalText   string
-	TranslatedText string
+	Key            string `json:"cache_key"`
+	Provider       string `json:"provider"`
+	Model          string `json:"model"`
+	SourceLang     string `json:"source_lang"`
+	TargetLang     string `json:"target_lang"`
+	OriginalText   string `json:"original_text"`
+	TranslatedText string `json:"translated_text"`
 }
 
 // LookupTranslations returns a map of cache_key → translated_text for hits.
@@ -146,6 +152,16 @@ func (c *Cache) LookupTranslations(ctx context.Context, keys []string) (map[stri
 
 // StoreTranslations bulk-inserts entries, ignoring conflicts on cache_key.
 func (c *Cache) StoreTranslations(ctx context.Context, entries []TranslationEntry) error {
+	return c.storeTranslations(ctx, entries, false)
+}
+
+// StoreTranslationsForSync atomically saves local fallback results and marks
+// them for eventual upload to the shared cache.
+func (c *Cache) StoreTranslationsForSync(ctx context.Context, entries []TranslationEntry) error {
+	return c.storeTranslations(ctx, entries, true)
+}
+
+func (c *Cache) storeTranslations(ctx context.Context, entries []TranslationEntry, queue bool) error {
 	if len(entries) == 0 {
 		return nil
 	}
@@ -163,6 +179,15 @@ func (c *Cache) StoreTranslations(ctx context.Context, entries []TranslationEntr
 		return err
 	}
 	defer stmt.Close()
+	var outbox *sql.Stmt
+	if queue {
+		outbox, err = tx.PrepareContext(ctx, `
+			INSERT OR IGNORE INTO sync_outbox (cache_key, queued_at) VALUES (?, ?)`)
+		if err != nil {
+			return err
+		}
+		defer outbox.Close()
+	}
 
 	now := time.Now().Unix()
 	for _, e := range entries {
@@ -171,8 +196,62 @@ func (c *Cache) StoreTranslations(ctx context.Context, entries []TranslationEntr
 			e.OriginalText, e.TranslatedText, now); err != nil {
 			return err
 		}
+		if outbox != nil {
+			if _, err := outbox.ExecContext(ctx, e.Key, now); err != nil {
+				return err
+			}
+		}
 	}
 	return tx.Commit()
+}
+
+// PendingSyncEntries returns local fallback translations waiting for upload.
+func (c *Cache) PendingSyncEntries(ctx context.Context, limit int) ([]TranslationEntry, error) {
+	if limit <= 0 {
+		limit = 100
+	}
+	rows, err := c.db.QueryContext(ctx, `
+		SELECT t.cache_key, t.provider, t.model, t.source_lang, t.target_lang,
+		       t.original_text, t.translated_text
+		FROM sync_outbox o
+		JOIN translations t ON t.cache_key = o.cache_key
+		ORDER BY o.queued_at ASC
+		LIMIT ?`, limit)
+	if err != nil {
+		return nil, fmt.Errorf("list sync outbox: %w", err)
+	}
+	defer rows.Close()
+
+	var entries []TranslationEntry
+	for rows.Next() {
+		var e TranslationEntry
+		if err := rows.Scan(&e.Key, &e.Provider, &e.Model, &e.SourceLang, &e.TargetLang,
+			&e.OriginalText, &e.TranslatedText); err != nil {
+			return nil, err
+		}
+		entries = append(entries, e)
+	}
+	return entries, rows.Err()
+}
+
+// AcknowledgeSyncEntries removes successfully uploaded entries from the outbox.
+func (c *Cache) AcknowledgeSyncEntries(ctx context.Context, keys []string) error {
+	if len(keys) == 0 {
+		return nil
+	}
+	placeholders := strings.TrimSuffix(strings.Repeat("?,", len(keys)), ",")
+	args := make([]any, len(keys))
+	for i, key := range keys {
+		args[i] = key
+	}
+	_, err := c.db.ExecContext(ctx, "DELETE FROM sync_outbox WHERE cache_key IN ("+placeholders+")", args...)
+	return err
+}
+
+func (c *Cache) PendingSyncCount(ctx context.Context) (int, error) {
+	var count int
+	err := c.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM sync_outbox`).Scan(&count)
+	return count, err
 }
 
 // ─── transcripts ────────────────────────────────────────────────────────────
@@ -344,7 +423,7 @@ func (c *Cache) Stats(ctx context.Context) (Stats, error) {
 }
 
 func (c *Cache) Clear(ctx context.Context) error {
-	_, err := c.db.ExecContext(ctx, `DELETE FROM translations; DELETE FROM transcripts; DELETE FROM jobs;`)
+	_, err := c.db.ExecContext(ctx, `DELETE FROM sync_outbox; DELETE FROM translations; DELETE FROM transcripts; DELETE FROM jobs;`)
 	return err
 }
 

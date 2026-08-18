@@ -217,6 +217,12 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "invalid json: "+err.Error(), http.StatusBadRequest)
 			return
 		}
+		// GET /v1/config never exposes this secret. Preserve only a token
+		// already stored on disk; an environment-provided token must not be
+		// copied into config.toml by an unrelated Options-page save.
+		if storedCfg, err := config.Load(s.cfgPath); err == nil {
+			newCfg.Sync.Token = storedCfg.Sync.Token
+		}
 		if err := newCfg.Save(s.cfgPath); err != nil {
 			http.Error(w, "save config: "+err.Error(), http.StatusInternalServerError)
 			return
