@@ -79,6 +79,12 @@ SQLite cache is checked first; only cache misses go to the always-on node. If
 that node cannot be reached quickly, translation falls back to the local
 provider and the result is queued in SQLite for automatic upload later.
 
+Translation results are shared across providers and models. Cache identity uses
+only the normalized source text, source language, and target language. Existing
+databases migrate automatically; if old provider-specific rows collide, the
+most recently created translation is kept. The first shared-sync run also
+queues historical local translations for idempotent upload to the central node.
+
 Generate one long token file on the central node, then securely copy that same
 file to each participating machine:
 

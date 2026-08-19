@@ -103,6 +103,21 @@ func (s *Server) handleResolve(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), status)
 		return
 	}
+	model := req.Model
+	if model == "" {
+		if prov, ok := s.resolver.providers[req.Provider]; ok {
+			model = prov.DefaultModel()
+		}
+	}
+	// Include legacy aliases so clients that still derive provider-specific
+	// keys can consume the provider-independent result during rollout.
+	for _, line := range req.Lines {
+		key := cache.Key(req.Provider, model, req.SourceLang, req.TargetLang, line.Text)
+		if translated, ok := translations[key]; ok {
+			legacy := cache.LegacyKey(req.Provider, model, req.SourceLang, req.TargetLang, line.Text)
+			translations[legacy] = translated
+		}
+	}
 	writeJSON(w, http.StatusOK, resolveResponse{Translations: translations, CacheHits: hits})
 }
 
@@ -122,19 +137,23 @@ func (s *Server) handleImport(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	keys := make([]string, 0, len(req.Entries))
-	for _, entry := range req.Entries {
-		if entry.Provider == "" || entry.Model == "" || entry.OriginalText == "" || entry.TranslatedText == "" {
+	normalized := make([]cache.TranslationEntry, len(req.Entries))
+	for i, entry := range req.Entries {
+		if entry.SourceLang == "" || entry.TargetLang == "" || entry.OriginalText == "" || entry.TranslatedText == "" {
 			http.Error(w, "translation entry is missing required fields", http.StatusBadRequest)
 			return
 		}
 		expected := cache.Key(entry.Provider, entry.Model, entry.SourceLang, entry.TargetLang, entry.OriginalText)
-		if entry.Key != expected {
+		legacy := cache.LegacyKey(entry.Provider, entry.Model, entry.SourceLang, entry.TargetLang, entry.OriginalText)
+		if entry.Key != expected && entry.Key != legacy {
 			http.Error(w, "translation entry has an invalid cache key", http.StatusBadRequest)
 			return
 		}
 		keys = append(keys, entry.Key)
+		entry.Key = expected
+		normalized[i] = entry
 	}
-	if err := s.cache.StoreTranslations(r.Context(), req.Entries); err != nil {
+	if err := s.cache.StoreTranslations(r.Context(), normalized); err != nil {
 		http.Error(w, "store translations: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -171,14 +190,7 @@ func (r *resolver) resolve(ctx context.Context, req resolveRequest) (map[string]
 	if len(req.Lines) > maxResolveLines {
 		return nil, 0, &requestError{"too many lines in one resolve request"}
 	}
-	prov, ok := r.providers[req.Provider]
-	if !ok {
-		return nil, 0, &requestError{fmt.Sprintf("provider %q is not configured on the shared node", req.Provider)}
-	}
 	model := req.Model
-	if model == "" {
-		model = prov.DefaultModel()
-	}
 	seenIndexes := make(map[int]struct{}, len(req.Lines))
 	keys := make([]string, 0, len(req.Lines))
 	lineByKey := make(map[string]provider.Line, len(req.Lines))
@@ -210,6 +222,13 @@ func (r *resolver) resolve(ctx context.Context, req resolveRequest) (map[string]
 	}
 	if len(missingKeys) == 0 {
 		return hits, initialHits, nil
+	}
+	prov, ok := r.providers[req.Provider]
+	if !ok {
+		return nil, initialHits, &requestError{fmt.Sprintf("provider %q is not configured on the shared node", req.Provider)}
+	}
+	if model == "" {
+		model = prov.DefaultModel()
 	}
 	sort.Strings(missingKeys)
 

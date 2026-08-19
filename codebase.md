@@ -76,7 +76,7 @@ popup teardown and MV3 content-script churn.
 |---|---|
 | `cmd/dualsub/main.go` | Entry. Subcommands: `serve`, `config init`, `version`. Owns wiring: load config → build providers map → make orchestrator → start HTTP server + logger. `buildProviders()` is the single registration point for provider impls. |
 | `internal/config/config.go` | TOML load + env-var overrides + defaults + `~` expansion. `Save()` does atomic-rename TOML write. **Both `toml:` and `json:` tags required** on every field — TOML is on disk, JSON is the API. |
-| `internal/cache/cache.go` | SQLite (`modernc.org/sqlite`, pure Go). Four tables: `translations`, `transcripts`, `jobs`, `sync_outbox`. Local fallback results and outbox keys are written atomically. `Key()` is the canonical cache-key derivation. `:memory:` accepted for tests. `SetMaxOpenConns(1)` is intentional (see §7). |
+| `internal/cache/cache.go` | SQLite (`modernc.org/sqlite`, pure Go). Five tables: `translations`, `transcripts`, `jobs`, `sync_outbox`, `cache_meta`. Local fallback results and outbox keys are written atomically. `QueueHistoricalTranslationsForSync()` performs one idempotent backfill for translations created before shared sync was enabled. `Key()` is the canonical cache-key derivation. `:memory:` accepted for tests. `SetMaxOpenConns(1)` is intentional (see §7). |
 | `internal/logger/logger.go` | JSONL append-only with mutex. `New("")` writes only to stderr. No rotation; user wipes manually. |
 | `internal/provider/` | LLM adapters. `provider.go` = interface + types + `Error` + error codes. `http.go` = shared client + status→code mapping (`mapStatus`). `prompt.go` = `BuildPrompt` + `ParseResponse`. `openai.go`, `gemini.go`, `ollama.go`, `claude.go` (stub). |
 | `internal/translate/` | Orchestrator. `event.go` = typed events. `orchestrator.go` = chunking + worker pool + retry-with-backoff + cache writes. Translation runs the worker pool; `Translate(ctx, in, events chan<- Event)` closes `events` itself. |
@@ -160,13 +160,14 @@ both sides** — the TS dispatcher is a string switch.
 ### 4.4 Cache key (`cache.Key`)
 
 ```
-sha256(provider | model | sourceLang | targetLang | normalize(originalText))
+sha256(shared-v2 | sourceLang | targetLang | normalize(originalText))
 ```
 
 `normalize` lowercases and collapses whitespace. Always derive cache keys
-via `cache.Key()`; never recompute by hand. Including `model` is
-intentional — different models give different translations, so swapping
-the model in config invalidates cache entries (no migration).
+via `cache.Key()`; never recompute by hand. Provider and model are metadata,
+not cache identity, so Codex, Gemini, Ollama, and future providers reuse the
+same result. `cache.LegacyKey()` exists only for compatibility with older
+shared-cache clients.
 
 ### 4.5 Extension ↔ content script messages
 
@@ -269,10 +270,10 @@ Invariants that bite if you forget:
 
 ### Change cache schema
 
-There is no migration story. Either:
-- Bump the cache key (e.g., add a version prefix in `cache.Key`) so old rows
-  miss, or
-- Document a "delete `~/.local/share/dualsub/cache.db` on upgrade" step.
+Add an automatic migration in `cache.Open()` and record its version in
+`cache_meta`. Migrations must preserve `sync_outbox` entries. The v1-to-v2
+cache-key migration keeps the newest row when provider-specific rows collapse
+to one shared key.
 
 ## 7. Gotchas (non-obvious things that bite)
 

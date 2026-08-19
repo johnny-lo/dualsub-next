@@ -2,6 +2,7 @@ package cache
 
 import (
 	"context"
+	"path/filepath"
 	"testing"
 )
 
@@ -25,9 +26,93 @@ func TestKeyDeterminism(t *testing.T) {
 	if a != c {
 		t.Errorf("normalize should make whitespace-different texts equal: %s vs %s", a, c)
 	}
-	d := Key("gemini", "gpt-4o-mini", "en", "zh-TW", "Hello world")
-	if a == d {
-		t.Errorf("different provider should give different key")
+	d := Key("gemini", "gemini-flash", "en", "zh-TW", "Hello world")
+	if a != d {
+		t.Errorf("provider and model should not change a shared key: %s vs %s", a, d)
+	}
+	e := Key("gemini", "gemini-flash", "en", "ja", "Hello world")
+	if a == e {
+		t.Error("different target languages should give different keys")
+	}
+}
+
+func TestLegacyKeyRemainsProviderSpecific(t *testing.T) {
+	a := LegacyKey("codex", "gpt-5", "en", "zh-TW", "Hello world")
+	b := LegacyKey("gemini", "flash", "en", "zh-TW", "Hello world")
+	if a == b {
+		t.Error("legacy keys should remain provider-specific")
+	}
+}
+
+func TestOpenMigratesLegacyKeysAndKeepsNewestResult(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "cache.db")
+	c, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.db.ExecContext(ctx,
+		`DELETE FROM cache_meta WHERE key = 'cache_key_version'`); err != nil {
+		t.Fatal(err)
+	}
+
+	oldKey := LegacyKey("codex", "gpt-5", "en", "zh-TW", "Hello world")
+	newerKey := LegacyKey("gemini", "flash", "en", "zh-TW", "  Hello   world ")
+	if _, err := c.db.ExecContext(ctx, `
+		INSERT INTO translations
+		(cache_key, provider, model, source_lang, target_lang, original_text, translated_text, created_at)
+		VALUES
+		(?, 'codex', 'gpt-5', 'en', 'zh-TW', 'Hello world', 'older result', 100),
+		(?, 'gemini', 'flash', 'en', 'zh-TW', '  Hello   world ', 'newer result', 200);
+		INSERT INTO sync_outbox (cache_key, queued_at) VALUES (?, 90), (?, 190);`,
+		oldKey, newerKey, oldKey, newerKey); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	c, err = Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = c.Close() })
+	sharedKey := Key("anything", "anything", "en", "zh-TW", "hello world")
+	hits, err := c.LookupTranslations(ctx, []string{sharedKey, oldKey, newerKey})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if hits[sharedKey] != "newer result" {
+		t.Fatalf("migrated result = %q, want newest result", hits[sharedKey])
+	}
+	if _, ok := hits[oldKey]; ok {
+		t.Error("legacy key remained after migration")
+	}
+	if _, ok := hits[newerKey]; ok {
+		t.Error("second legacy key remained after migration")
+	}
+
+	stats, err := c.Stats(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats.Translations != 1 {
+		t.Fatalf("translation rows = %d, want 1", stats.Translations)
+	}
+	pending, err := c.PendingSyncEntries(ctx, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pending) != 1 || pending[0].Key != sharedKey || pending[0].TranslatedText != "newer result" {
+		t.Fatalf("pending entries = %+v", pending)
+	}
+	var version string
+	if err := c.db.QueryRowContext(ctx,
+		`SELECT value FROM cache_meta WHERE key = 'cache_key_version'`).Scan(&version); err != nil {
+		t.Fatal(err)
+	}
+	if version != currentCacheKeyVersion {
+		t.Fatalf("cache key version = %q, want %q", version, currentCacheKeyVersion)
 	}
 }
 
@@ -272,5 +357,50 @@ func TestSyncOutboxLifecycle(t *testing.T) {
 	hits, err := c.LookupTranslations(ctx, []string{entry.Key})
 	if err != nil || hits[entry.Key] != entry.TranslatedText {
 		t.Fatalf("acknowledging outbox removed translation: hits=%v err=%v", hits, err)
+	}
+}
+
+func TestQueueHistoricalTranslationsForSyncRunsOnce(t *testing.T) {
+	ctx := context.Background()
+	c := newTestCache(t)
+	entries := []TranslationEntry{
+		{
+			Provider: "codex", Model: "gpt-5", SourceLang: "en", TargetLang: "zh-TW",
+			OriginalText: "first", TranslatedText: "first result",
+		},
+		{
+			Provider: "gemini", Model: "flash", SourceLang: "en", TargetLang: "zh-TW",
+			OriginalText: "second", TranslatedText: "second result",
+		},
+	}
+	for i := range entries {
+		entries[i].Key = Key(entries[i].Provider, entries[i].Model, entries[i].SourceLang,
+			entries[i].TargetLang, entries[i].OriginalText)
+	}
+	if err := c.StoreTranslations(ctx, entries); err != nil {
+		t.Fatal(err)
+	}
+
+	queued, err := c.QueueHistoricalTranslationsForSync(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if queued != 2 {
+		t.Fatalf("queued = %d, want 2", queued)
+	}
+	count, err := c.PendingSyncCount(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if count != 2 {
+		t.Fatalf("pending count = %d, want 2", count)
+	}
+
+	queued, err = c.QueueHistoricalTranslationsForSync(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if queued != 0 {
+		t.Fatalf("second backfill queued = %d, want 0", queued)
 	}
 }

@@ -217,7 +217,7 @@ func TestCacheHits(t *testing.T) {
 	}
 }
 
-func TestDefaultModelUsedForProviderRequestAndCacheKey(t *testing.T) {
+func TestDefaultModelUsedForProviderRequestAndSharedCacheKey(t *testing.T) {
 	ctx := context.Background()
 	lines := mkLines(1)
 	m := &mockProvider{name: "mock", defaultModel: "model-a", queue: []mockResponse{
@@ -252,12 +252,8 @@ func TestDefaultModelUsedForProviderRequestAndCacheKey(t *testing.T) {
 	}
 
 	blankKey := cache.Key("mock", "", "en", "zh-TW", lines[0].Text)
-	blankHits, err := c.LookupTranslations(ctx, []string{blankKey})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, ok := blankHits[blankKey]; ok {
-		t.Fatal("translation was also cached under an empty model")
+	if blankKey != modelKey {
+		t.Fatal("model changed a provider-independent cache key")
 	}
 }
 

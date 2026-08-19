@@ -22,6 +22,11 @@ type Cache struct {
 	db *sql.DB
 }
 
+const (
+	currentCacheKeyVersion     = "2"
+	currentSyncBackfillVersion = "1"
+)
+
 const schema = `
 CREATE TABLE IF NOT EXISTS translations (
 	cache_key       TEXT PRIMARY KEY,
@@ -63,6 +68,11 @@ CREATE TABLE IF NOT EXISTS sync_outbox (
 	queued_at INTEGER NOT NULL,
 	FOREIGN KEY(cache_key) REFERENCES translations(cache_key) ON DELETE CASCADE
 );
+
+CREATE TABLE IF NOT EXISTS cache_meta (
+	key   TEXT PRIMARY KEY,
+	value TEXT NOT NULL
+);
 `
 
 // Open returns a Cache backed by the given SQLite path.
@@ -87,15 +97,28 @@ func Open(path string) (*Cache, error) {
 		_ = db.Close()
 		return nil, fmt.Errorf("apply schema: %w", err)
 	}
-	return &Cache{db: db}, nil
+	c := &Cache{db: db}
+	if err := c.migrateCacheKeys(context.Background()); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("migrate cache keys: %w", err)
+	}
+	return c, nil
 }
 
 func (c *Cache) Close() error { return c.db.Close() }
 
-// Key derives a deterministic cache key for a translation lookup.
-// Source text is normalized (lowercase + collapsed whitespace) so that
-// minor whitespace differences across runs still hit the cache.
-func Key(provider, model, sourceLang, targetLang, originalText string) string {
+// Key derives a provider-independent key so all translation methods share
+// results. Provider and model remain parameters for call-site compatibility.
+func Key(_, _, sourceLang, targetLang, originalText string) string {
+	h := sha256.New()
+	fmt.Fprintf(h, "shared-v%s|%s|%s|%s",
+		currentCacheKeyVersion, sourceLang, targetLang, normalize(originalText))
+	return hex.EncodeToString(h.Sum(nil))
+}
+
+// LegacyKey derives the provider-specific key used before cache key version 2.
+// The shared server accepts it only for compatibility with older clients.
+func LegacyKey(provider, model, sourceLang, targetLang, originalText string) string {
 	h := sha256.New()
 	fmt.Fprintf(h, "%s|%s|%s|%s|%s",
 		provider, model, sourceLang, targetLang, normalize(originalText))
@@ -104,6 +127,140 @@ func Key(provider, model, sourceLang, targetLang, originalText string) string {
 
 func normalize(s string) string {
 	return strings.Join(strings.Fields(strings.ToLower(s)), " ")
+}
+
+type migrationTranslation struct {
+	key            string
+	provider       string
+	model          string
+	sourceLang     string
+	targetLang     string
+	originalText   string
+	translatedText string
+	createdAt      int64
+	queuedAt       sql.NullInt64
+}
+
+func (c *Cache) migrateCacheKeys(ctx context.Context) error {
+	var version string
+	err := c.db.QueryRowContext(ctx,
+		`SELECT value FROM cache_meta WHERE key = 'cache_key_version'`).Scan(&version)
+	if err == nil {
+		if version != currentCacheKeyVersion {
+			return fmt.Errorf("unsupported cache key version %q", version)
+		}
+		return nil
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return err
+	}
+
+	rows, err := c.db.QueryContext(ctx, `
+		SELECT t.cache_key, t.provider, t.model, t.source_lang, t.target_lang,
+		       t.original_text, t.translated_text, t.created_at, o.queued_at
+		FROM translations t
+		LEFT JOIN sync_outbox o ON o.cache_key = t.cache_key
+		ORDER BY t.created_at DESC, t.cache_key DESC`)
+	if err != nil {
+		return err
+	}
+	var existing []migrationTranslation
+	for rows.Next() {
+		var row migrationTranslation
+		if err := rows.Scan(&row.key, &row.provider, &row.model, &row.sourceLang,
+			&row.targetLang, &row.originalText, &row.translatedText, &row.createdAt,
+			&row.queuedAt); err != nil {
+			_ = rows.Close()
+			return err
+		}
+		existing = append(existing, row)
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return err
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+
+	tx, err := c.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	if len(existing) == 0 {
+		if _, err := tx.ExecContext(ctx, `
+			INSERT INTO cache_meta (key, value) VALUES ('cache_key_version', ?)`,
+			currentCacheKeyVersion); err != nil {
+			return err
+		}
+		return tx.Commit()
+	}
+
+	if _, err := tx.ExecContext(ctx, `
+		CREATE TABLE translations_v2 (
+			cache_key       TEXT PRIMARY KEY,
+			provider        TEXT NOT NULL,
+			model           TEXT NOT NULL,
+			source_lang     TEXT NOT NULL,
+			target_lang     TEXT NOT NULL,
+			original_text   TEXT NOT NULL,
+			translated_text TEXT NOT NULL,
+			created_at      INTEGER NOT NULL
+		)`); err != nil {
+		return err
+	}
+
+	insert, err := tx.PrepareContext(ctx, `
+		INSERT OR IGNORE INTO translations_v2
+		(cache_key, provider, model, source_lang, target_lang, original_text, translated_text, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`)
+	if err != nil {
+		return err
+	}
+	queued := make(map[string]int64)
+	for _, row := range existing {
+		key := Key(row.provider, row.model, row.sourceLang, row.targetLang, row.originalText)
+		if _, err := insert.ExecContext(ctx, key, row.provider, row.model, row.sourceLang,
+			row.targetLang, row.originalText, row.translatedText, row.createdAt); err != nil {
+			_ = insert.Close()
+			return err
+		}
+		if row.queuedAt.Valid {
+			if current, ok := queued[key]; !ok || row.queuedAt.Int64 < current {
+				queued[key] = row.queuedAt.Int64
+			}
+		}
+	}
+	if err := insert.Close(); err != nil {
+		return err
+	}
+
+	if _, err := tx.ExecContext(ctx, `
+		DROP TABLE sync_outbox;
+		DROP TABLE translations;
+		ALTER TABLE translations_v2 RENAME TO translations;
+		CREATE INDEX idx_translations_provider ON translations(provider, target_lang);
+		CREATE TABLE sync_outbox (
+			cache_key TEXT PRIMARY KEY,
+			queued_at INTEGER NOT NULL,
+			FOREIGN KEY(cache_key) REFERENCES translations(cache_key) ON DELETE CASCADE
+		);`); err != nil {
+		return err
+	}
+	for key, queuedAt := range queued {
+		if _, err := tx.ExecContext(ctx,
+			`INSERT INTO sync_outbox (cache_key, queued_at) VALUES (?, ?)`, key, queuedAt); err != nil {
+			return err
+		}
+	}
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO cache_meta (key, value) VALUES ('cache_key_version', ?)`,
+		currentCacheKeyVersion); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 // ─── translations ───────────────────────────────────────────────────────────
@@ -159,6 +316,48 @@ func (c *Cache) StoreTranslations(ctx context.Context, entries []TranslationEntr
 // them for eventual upload to the shared cache.
 func (c *Cache) StoreTranslationsForSync(ctx context.Context, entries []TranslationEntry) error {
 	return c.storeTranslations(ctx, entries, true)
+}
+
+// QueueHistoricalTranslationsForSync marks translations created before shared
+// caching was enabled for one-time upload. Later fallback writes use the normal
+// atomic outbox path.
+func (c *Cache) QueueHistoricalTranslationsForSync(ctx context.Context) (int, error) {
+	tx, err := c.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback()
+
+	var version string
+	err = tx.QueryRowContext(ctx,
+		`SELECT value FROM cache_meta WHERE key = 'sync_backfill_version'`).Scan(&version)
+	if err == nil && version == currentSyncBackfillVersion {
+		return 0, tx.Commit()
+	}
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return 0, err
+	}
+
+	result, err := tx.ExecContext(ctx, `
+		INSERT OR IGNORE INTO sync_outbox (cache_key, queued_at)
+		SELECT cache_key, ? FROM translations`, time.Now().Unix())
+	if err != nil {
+		return 0, err
+	}
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO cache_meta (key, value) VALUES ('sync_backfill_version', ?)
+		ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
+		currentSyncBackfillVersion); err != nil {
+		return 0, err
+	}
+	queued, err := result.RowsAffected()
+	if err != nil {
+		return 0, err
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
+	return int(queued), nil
 }
 
 func (c *Cache) storeTranslations(ctx context.Context, entries []TranslationEntry, queue bool) error {

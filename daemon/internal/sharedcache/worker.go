@@ -8,6 +8,9 @@ import (
 )
 
 func SyncOutboxOnce(ctx context.Context, local *cache.Cache, remote *Client) (int, error) {
+	if _, err := local.QueueHistoricalTranslationsForSync(ctx); err != nil {
+		return 0, err
+	}
 	entries, err := local.PendingSyncEntries(ctx, 200)
 	if err != nil || len(entries) == 0 {
 		return 0, err
@@ -22,11 +25,22 @@ func SyncOutboxOnce(ctx context.Context, local *cache.Cache, remote *Client) (in
 	return len(acknowledged), nil
 }
 
+func drainOutbox(ctx context.Context, local *cache.Cache, remote *Client) (int, error) {
+	total := 0
+	for {
+		uploaded, err := SyncOutboxOnce(ctx, local, remote)
+		total += uploaded
+		if err != nil || uploaded == 0 {
+			return total, err
+		}
+	}
+}
+
 func RunOutbox(ctx context.Context, local *cache.Cache, remote *Client, interval time.Duration) {
 	if interval <= 0 {
 		interval = 30 * time.Second
 	}
-	_, _ = SyncOutboxOnce(ctx, local, remote)
+	_, _ = drainOutbox(ctx, local, remote)
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for {
@@ -34,7 +48,7 @@ func RunOutbox(ctx context.Context, local *cache.Cache, remote *Client, interval
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			_, _ = SyncOutboxOnce(ctx, local, remote)
+			_, _ = drainOutbox(ctx, local, remote)
 		}
 	}
 }
