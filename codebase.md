@@ -81,7 +81,7 @@ popup teardown and MV3 content-script churn.
 | `internal/provider/` | LLM adapters. `provider.go` = interface + types + `Error` + error codes. `http.go` = shared client + status→code mapping (`mapStatus`). `prompt.go` = `BuildPrompt` + `ParseResponse`. `openai.go`, `gemini.go`, `ollama.go`, `claude.go` (stub). |
 | `internal/translate/` | Orchestrator. `event.go` = typed events. `orchestrator.go` = chunking + worker pool + retry-with-backoff + cache writes. Translation runs the worker pool; `Translate(ctx, in, events chan<- Event)` closes `events` itself. |
 | `internal/server/` | HTTP routes + SSE writer + CORS. `server.go` constructs and exposes `ListenAndServe`. `handlers.go` has all route handlers. `sse.go` is the SSE writer. |
-| `internal/sharedcache/` | Tailscale-oriented local-first sharing. Authenticated central resolve/import server, circuit-breaking client/provider wrapper, exact-batch in-flight coalescing, and the background outbox uploader. It never exposes daemon config or API keys. |
+| `internal/sharedcache/` | Tailscale-oriented local-first sharing. Authenticated central resolve/import server, circuit-breaking client/provider wrapper, exact-batch in-flight coalescing, and the background outbox uploader. It never exposes daemon config or API keys. `events.go` defines the optional `EventLogger`; both sides log `shared_*` events (resolve/import/auth failures on the central node, fetch/fallback/upload on clients) so sync activity is observable. |
 
 ### extension/
 

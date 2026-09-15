@@ -26,6 +26,7 @@ type ClientOptions struct {
 	ConnectTimeout time.Duration
 	RequestTimeout time.Duration
 	RetryDelay     time.Duration
+	Logger         EventLogger
 }
 
 type Client struct {
@@ -33,6 +34,7 @@ type Client struct {
 	token      string
 	http       *http.Client
 	retryDelay time.Duration
+	log        EventLogger
 
 	mu               sync.Mutex
 	unavailableUntil time.Time
@@ -72,6 +74,7 @@ func NewClient(opts ClientOptions) (*Client, error) {
 			Timeout:   opts.RequestTimeout,
 		},
 		retryDelay: opts.RetryDelay,
+		log:        loggerOrNop(opts.Logger),
 	}, nil
 }
 
@@ -79,6 +82,7 @@ func (c *Client) Resolve(ctx context.Context, providerName, defaultModel string,
 	if err := c.available(); err != nil {
 		return provider.Response{}, err
 	}
+	start := time.Now()
 	model := in.Model
 	if model == "" {
 		model = defaultModel
@@ -104,6 +108,10 @@ func (c *Client) Resolve(ctx context.Context, providerName, defaultModel string,
 		lines = append(lines, provider.TranslatedLine{Index: line.Index, Text: translated})
 	}
 	c.markAvailable()
+	c.log.Event("shared_fetch", map[string]any{
+		"central": c.baseURL, "provider": providerName, "model": model, "lines": len(in.Lines),
+		"cache_hits": payload.CacheHits, "duration_ms": time.Since(start).Milliseconds(),
+	})
 	return provider.Response{Lines: lines}, nil
 }
 
@@ -183,12 +191,16 @@ func (p *FallbackProvider) Name() string         { return p.local.Name() }
 func (p *FallbackProvider) DefaultModel() string { return p.local.DefaultModel() }
 
 func (p *FallbackProvider) Translate(ctx context.Context, in provider.Request) (provider.Response, error) {
-	if res, err := p.remote.Resolve(ctx, p.Name(), p.DefaultModel(), in); err == nil {
+	res, remoteErr := p.remote.Resolve(ctx, p.Name(), p.DefaultModel(), in)
+	if remoteErr == nil {
 		return res, nil
 	}
 	if err := ctx.Err(); err != nil {
 		return provider.Response{}, err
 	}
+	p.remote.log.Event("shared_fallback_local", map[string]any{
+		"central": p.remote.baseURL, "provider": p.Name(), "lines": len(in.Lines), "error": remoteErr.Error(),
+	})
 	res, err := p.local.Translate(ctx, in)
 	if err == nil {
 		res.QueueForSync = true

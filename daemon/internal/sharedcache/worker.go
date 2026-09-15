@@ -2,14 +2,19 @@ package sharedcache
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"github.com/johnny/dualsub-next/daemon/internal/cache"
 )
 
 func SyncOutboxOnce(ctx context.Context, local *cache.Cache, remote *Client) (int, error) {
-	if _, err := local.QueueHistoricalTranslationsForSync(ctx); err != nil {
+	queued, err := local.QueueHistoricalTranslationsForSync(ctx)
+	if err != nil {
 		return 0, err
+	}
+	if queued > 0 {
+		remote.log.Event("shared_history_queued", map[string]any{"entries": queued})
 	}
 	entries, err := local.PendingSyncEntries(ctx, 200)
 	if err != nil || len(entries) == 0 {
@@ -17,11 +22,21 @@ func SyncOutboxOnce(ctx context.Context, local *cache.Cache, remote *Client) (in
 	}
 	acknowledged, err := remote.Import(ctx, entries)
 	if err != nil {
+		// While the circuit is open every tick fails the same way; the first
+		// failure already explained the outage.
+		if !errors.Is(err, errCircuitOpen) {
+			remote.log.Event("shared_upload_failed", map[string]any{
+				"central": remote.baseURL, "entries": len(entries), "error": err.Error(),
+			})
+		}
 		return 0, err
 	}
 	if err := local.AcknowledgeSyncEntries(ctx, acknowledged); err != nil {
 		return 0, err
 	}
+	remote.log.Event("shared_upload", map[string]any{
+		"central": remote.baseURL, "entries": len(entries), "acknowledged": len(acknowledged),
+	})
 	return len(acknowledged), nil
 }
 

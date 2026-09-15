@@ -129,6 +129,7 @@ Or run: dualsub config init`, *cfgPath)
 			BaseURL: cfg.Sync.CentralURL, Token: cfg.Sync.Token,
 			ConnectTimeout: time.Duration(cfg.Sync.ConnectTimeoutMS) * time.Millisecond,
 			RequestTimeout: time.Duration(cfg.Sync.RequestTimeoutSeconds) * time.Second,
+			Logger:         lg,
 		})
 		if err != nil {
 			return err
@@ -157,6 +158,7 @@ Or run: dualsub config init`, *cfgPath)
 	if cfg.Sync.Listen != "" {
 		syncServer = sharedcache.NewServer(sharedcache.ServerOptions{
 			Addr: cfg.Sync.Listen, Token: cfg.Sync.Token, Cache: c, Providers: baseProviders,
+			Logger: lg,
 		})
 	}
 

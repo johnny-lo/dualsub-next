@@ -197,6 +197,25 @@ The optional shared-cache listener uses a separate address and requires
 | POST   | `/v1/resolve` | resolve from central cache or translate centrally |
 | POST   | `/v1/import`  | idempotently import offline local translations    |
 
+Shared-cache traffic is recorded in the daemon's JSONL log (`daemon.log` next
+to the cache database, also mirrored to stderr), so you can confirm that clients
+really fetch from and upload to the central node:
+
+| Side    | Event                   | Meaning                                                        |
+|---------|-------------------------|----------------------------------------------------------------|
+| central | `shared_resolve`        | a client fetched lines; `cache_hits` served from cache, `misses` translated centrally |
+| central | `shared_import`         | a client uploaded offline translations (`entries`)             |
+| central | `shared_auth_failed`    | request rejected for a missing or wrong sync token             |
+| client  | `shared_fetch`          | lines were served by the central node                          |
+| client  | `shared_fallback_local` | central unreachable or failed; translated locally and queued   |
+| client  | `shared_upload`         | outbox batch acknowledged by the central node                  |
+| client  | `shared_upload_failed`  | outbox upload failed (logged once per outage)                  |
+| client  | `shared_history_queued` | pre-existing local translations queued for the first upload    |
+
+```bash
+grep '"kind":"shared_' ~/.local/share/dualsub/daemon.log | tail
+```
+
 ## Acknowledgements
 
 The Udemy three-tier subtitle extraction strategy was inspired by

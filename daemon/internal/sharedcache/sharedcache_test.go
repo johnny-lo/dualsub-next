@@ -57,10 +57,47 @@ func newTestCache(t *testing.T) *cache.Cache {
 	return c
 }
 
+type recordingLogger struct {
+	mu     sync.Mutex
+	events []recordedEvent
+}
+
+type recordedEvent struct {
+	kind   string
+	fields map[string]any
+}
+
+func (l *recordingLogger) Event(kind string, fields map[string]any) {
+	copied := make(map[string]any, len(fields))
+	for k, v := range fields {
+		copied[k] = v
+	}
+	l.mu.Lock()
+	l.events = append(l.events, recordedEvent{kind: kind, fields: copied})
+	l.mu.Unlock()
+}
+
+func (l *recordingLogger) byKind(kind string) []map[string]any {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	var out []map[string]any
+	for _, e := range l.events {
+		if e.kind == kind {
+			out = append(out, e.fields)
+		}
+	}
+	return out
+}
+
 func newTestServer(t *testing.T, c *cache.Cache, p provider.Provider) *httptest.Server {
 	t.Helper()
+	return newLoggedTestServer(t, c, p, nil)
+}
+
+func newLoggedTestServer(t *testing.T, c *cache.Cache, p provider.Provider, lg EventLogger) *httptest.Server {
+	t.Helper()
 	s := NewServer(ServerOptions{
-		Token: "test-token", Cache: c, Providers: map[string]provider.Provider{"mock": p},
+		Token: "test-token", Cache: c, Providers: map[string]provider.Provider{"mock": p}, Logger: lg,
 	})
 	ts := httptest.NewServer(s.http.Handler)
 	t.Cleanup(ts.Close)
@@ -69,9 +106,14 @@ func newTestServer(t *testing.T, c *cache.Cache, p provider.Provider) *httptest.
 
 func newTestClient(t *testing.T, baseURL, token string) *Client {
 	t.Helper()
+	return newLoggedTestClient(t, baseURL, token, nil)
+}
+
+func newLoggedTestClient(t *testing.T, baseURL, token string, lg EventLogger) *Client {
+	t.Helper()
 	c, err := NewClient(ClientOptions{
 		BaseURL: baseURL, Token: token, ConnectTimeout: 50 * time.Millisecond,
-		RequestTimeout: 2 * time.Second, RetryDelay: time.Millisecond,
+		RequestTimeout: 2 * time.Second, RetryDelay: time.Millisecond, Logger: lg,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -457,5 +499,145 @@ func TestImportAcceptsSharedKeyWithoutProviderOrModelMetadata(t *testing.T) {
 	hits, err := central.LookupTranslations(ctx, []string{entry.Key})
 	if err != nil || hits[entry.Key] != entry.TranslatedText {
 		t.Fatalf("central hits=%v err=%v", hits, err)
+	}
+}
+
+func TestServerLogsResolveActivity(t *testing.T) {
+	lg := &recordingLogger{}
+	ts := newLoggedTestServer(t, newTestCache(t), &mockProvider{}, lg)
+	client := newTestClient(t, ts.URL, "test-token")
+	req := provider.Request{
+		Lines:      []provider.Line{{Index: 1, Text: "Hello"}, {Index: 2, Text: "World"}},
+		SourceLang: "en", TargetLang: "zh-TW",
+	}
+	for range 2 {
+		if _, err := client.Resolve(context.Background(), "mock", "mock-model", req); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	events := lg.byKind("shared_resolve")
+	if len(events) != 2 {
+		t.Fatalf("shared_resolve events = %d, want 2", len(events))
+	}
+	first, second := events[0], events[1]
+	if first["lines"] != 2 || first["cache_hits"] != 0 || first["misses"] != 2 || first["status"] != http.StatusOK {
+		t.Errorf("first resolve event = %v, want 2 lines translated centrally", first)
+	}
+	if second["cache_hits"] != 2 || second["misses"] != 0 {
+		t.Errorf("second resolve event = %v, want 2 cache hits", second)
+	}
+	if first["remote"] != "127.0.0.1" || first["provider"] != "mock" {
+		t.Errorf("resolve event identity = %v", first)
+	}
+}
+
+func TestServerLogsRejectedRequests(t *testing.T) {
+	lg := &recordingLogger{}
+	ts := newLoggedTestServer(t, newTestCache(t), &mockProvider{}, lg)
+	res, err := http.Get(ts.URL + "/healthz")
+	if err != nil {
+		t.Fatal(err)
+	}
+	res.Body.Close()
+
+	failed := lg.byKind("shared_auth_failed")
+	if len(failed) != 1 || failed[0]["path"] != "/healthz" || failed[0]["remote"] != "127.0.0.1" {
+		t.Fatalf("shared_auth_failed events = %v", failed)
+	}
+}
+
+func TestSyncOutboxLogsUploadOnBothSides(t *testing.T) {
+	ctx := context.Background()
+	serverLog, clientLog := &recordingLogger{}, &recordingLogger{}
+	local := newTestCache(t)
+	ts := newLoggedTestServer(t, newTestCache(t), &mockProvider{}, serverLog)
+	client := newLoggedTestClient(t, ts.URL, "test-token", clientLog)
+	entry := cache.TranslationEntry{
+		Provider: "mock", Model: "mock-model", SourceLang: "en", TargetLang: "zh-TW",
+		OriginalText: "offline", TranslatedText: "離線",
+	}
+	entry.Key = cache.Key(entry.Provider, entry.Model, entry.SourceLang, entry.TargetLang, entry.OriginalText)
+	if err := local.StoreTranslationsForSync(ctx, []cache.TranslationEntry{entry}); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := SyncOutboxOnce(ctx, local, client); err != nil {
+		t.Fatal(err)
+	}
+	imports := serverLog.byKind("shared_import")
+	if len(imports) != 1 || imports[0]["entries"] != 1 || imports[0]["status"] != http.StatusOK {
+		t.Fatalf("shared_import events = %v", imports)
+	}
+	uploads := clientLog.byKind("shared_upload")
+	if len(uploads) != 1 || uploads[0]["acknowledged"] != 1 {
+		t.Fatalf("shared_upload events = %v", uploads)
+	}
+
+	// An empty outbox tick is silent so the 30s interval does not flood the log.
+	if _, err := SyncOutboxOnce(ctx, local, client); err != nil {
+		t.Fatal(err)
+	}
+	if uploads := clientLog.byKind("shared_upload"); len(uploads) != 1 {
+		t.Fatalf("idle tick logged an upload: %v", uploads)
+	}
+}
+
+func TestSyncOutboxLogsUploadFailureOncePerOutage(t *testing.T) {
+	ctx := context.Background()
+	lg := &recordingLogger{}
+	local := newTestCache(t)
+	client, err := NewClient(ClientOptions{
+		BaseURL: "http://127.0.0.1:1", Token: "test-token", ConnectTimeout: 50 * time.Millisecond,
+		RequestTimeout: time.Second, RetryDelay: time.Minute, Logger: lg,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	entry := cache.TranslationEntry{
+		Provider: "mock", Model: "mock-model", SourceLang: "en", TargetLang: "zh-TW",
+		OriginalText: "offline", TranslatedText: "離線",
+	}
+	entry.Key = cache.Key(entry.Provider, entry.Model, entry.SourceLang, entry.TargetLang, entry.OriginalText)
+	if err := local.StoreTranslationsForSync(ctx, []cache.TranslationEntry{entry}); err != nil {
+		t.Fatal(err)
+	}
+
+	for range 2 {
+		if _, err := SyncOutboxOnce(ctx, local, client); err == nil {
+			t.Fatal("expected upload to an unreachable central node to fail")
+		}
+	}
+	failed := lg.byKind("shared_upload_failed")
+	if len(failed) != 1 || failed[0]["entries"] != 1 || failed[0]["error"] == "" {
+		t.Fatalf("shared_upload_failed events = %v, want one per outage", failed)
+	}
+}
+
+func TestClientLogsCentralFetchAndLocalFallback(t *testing.T) {
+	ctx := context.Background()
+	lg := &recordingLogger{}
+	ts := newTestServer(t, newTestCache(t), &mockProvider{})
+	req := provider.Request{
+		Lines:      []provider.Line{{Index: 1, Text: "Hello"}},
+		SourceLang: "en", TargetLang: "zh-TW",
+	}
+
+	online := NewFallbackProvider(&mockProvider{}, newLoggedTestClient(t, ts.URL, "test-token", lg))
+	if _, err := online.Translate(ctx, req); err != nil {
+		t.Fatal(err)
+	}
+	fetches := lg.byKind("shared_fetch")
+	if len(fetches) != 1 || fetches[0]["lines"] != 1 || fetches[0]["cache_hits"] != 0 || fetches[0]["provider"] != "mock" {
+		t.Fatalf("shared_fetch events = %v", fetches)
+	}
+
+	offline := NewFallbackProvider(&mockProvider{}, newLoggedTestClient(t, "http://127.0.0.1:1", "test-token", lg))
+	if _, err := offline.Translate(ctx, req); err != nil {
+		t.Fatal(err)
+	}
+	fallbacks := lg.byKind("shared_fallback_local")
+	if len(fallbacks) != 1 || fallbacks[0]["lines"] != 1 || fallbacks[0]["error"] == "" {
+		t.Fatalf("shared_fallback_local events = %v", fallbacks)
 	}
 }

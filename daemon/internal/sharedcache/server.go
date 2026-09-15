@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"sort"
 	"strings"
@@ -30,6 +31,7 @@ type ServerOptions struct {
 	Token     string
 	Cache     *cache.Cache
 	Providers map[string]provider.Provider
+	Logger    EventLogger
 }
 
 type Server struct {
@@ -37,12 +39,14 @@ type Server struct {
 	token    string
 	resolver *resolver
 	cache    *cache.Cache
+	log      EventLogger
 }
 
 func NewServer(opts ServerOptions) *Server {
 	s := &Server{
 		token: opts.Token,
 		cache: opts.Cache,
+		log:   loggerOrNop(opts.Logger),
 		resolver: &resolver{
 			cache: opts.Cache, providers: opts.Providers, inflight: make(map[string]*flightCall),
 		},
@@ -64,6 +68,7 @@ func (s *Server) auth(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		provided := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
 		if len(provided) != len(s.token) || subtle.ConstantTimeCompare([]byte(provided), []byte(s.token)) != 1 {
+			s.log.Event("shared_auth_failed", map[string]any{"remote": remoteIP(r), "path": r.URL.Path})
 			w.Header().Set("WWW-Authenticate", "Bearer")
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
@@ -85,13 +90,15 @@ func (s *Server) handleResolve(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
+	start := time.Now()
 	r.Body = http.MaxBytesReader(w, r.Body, maxResolveBody)
 	var req resolveRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		s.logResolve(r, req, 0, 0, start, http.StatusBadRequest, err)
 		http.Error(w, "invalid json: "+err.Error(), http.StatusBadRequest)
 		return
 	}
-	translations, hits, err := s.resolver.resolve(r.Context(), req)
+	translations, hits, misses, err := s.resolver.resolve(r.Context(), req)
 	if err != nil {
 		status := http.StatusBadGateway
 		var bad *requestError
@@ -100,6 +107,7 @@ func (s *Server) handleResolve(w http.ResponseWriter, r *http.Request) {
 		} else if errors.Is(err, context.DeadlineExceeded) {
 			status = http.StatusGatewayTimeout
 		}
+		s.logResolve(r, req, hits, misses, start, status, err)
 		http.Error(w, err.Error(), status)
 		return
 	}
@@ -118,7 +126,38 @@ func (s *Server) handleResolve(w http.ResponseWriter, r *http.Request) {
 			translations[legacy] = translated
 		}
 	}
+	s.logResolve(r, req, hits, misses, start, http.StatusOK, nil)
 	writeJSON(w, http.StatusOK, resolveResponse{Translations: translations, CacheHits: hits})
+}
+
+// logResolve records one client fetch. misses > 0 means the central node had to
+// translate (or wait for an in-flight translation of) those lines itself.
+func (s *Server) logResolve(r *http.Request, req resolveRequest, hits, misses int, start time.Time, status int, err error) {
+	fields := map[string]any{
+		"remote": remoteIP(r), "provider": req.Provider, "model": req.Model, "lines": len(req.Lines),
+		"cache_hits": hits, "misses": misses, "status": status,
+		"duration_ms": time.Since(start).Milliseconds(),
+	}
+	if err != nil {
+		fields["error"] = err.Error()
+	}
+	s.log.Event("shared_resolve", fields)
+}
+
+func (s *Server) logImport(r *http.Request, entries, status int, err error) {
+	fields := map[string]any{"remote": remoteIP(r), "entries": entries, "status": status}
+	if err != nil {
+		fields["error"] = err.Error()
+	}
+	s.log.Event("shared_import", fields)
+}
+
+func remoteIP(r *http.Request) string {
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		return r.RemoteAddr
+	}
+	return host
 }
 
 func (s *Server) handleImport(w http.ResponseWriter, r *http.Request) {
@@ -129,24 +168,29 @@ func (s *Server) handleImport(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, maxImportBody)
 	var req importRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		s.logImport(r, 0, http.StatusBadRequest, err)
 		http.Error(w, "invalid json: "+err.Error(), http.StatusBadRequest)
 		return
 	}
+	reject := func(message string) {
+		s.logImport(r, len(req.Entries), http.StatusBadRequest, errors.New(message))
+		http.Error(w, message, http.StatusBadRequest)
+	}
 	if len(req.Entries) == 0 || len(req.Entries) > maxImportEntries {
-		http.Error(w, "entries must contain between 1 and 2000 translations", http.StatusBadRequest)
+		reject("entries must contain between 1 and 2000 translations")
 		return
 	}
 	keys := make([]string, 0, len(req.Entries))
 	normalized := make([]cache.TranslationEntry, len(req.Entries))
 	for i, entry := range req.Entries {
 		if entry.SourceLang == "" || entry.TargetLang == "" || entry.OriginalText == "" || entry.TranslatedText == "" {
-			http.Error(w, "translation entry is missing required fields", http.StatusBadRequest)
+			reject("translation entry is missing required fields")
 			return
 		}
 		expected := cache.Key(entry.Provider, entry.Model, entry.SourceLang, entry.TargetLang, entry.OriginalText)
 		legacy := cache.LegacyKey(entry.Provider, entry.Model, entry.SourceLang, entry.TargetLang, entry.OriginalText)
 		if entry.Key != expected && entry.Key != legacy {
-			http.Error(w, "translation entry has an invalid cache key", http.StatusBadRequest)
+			reject("translation entry has an invalid cache key")
 			return
 		}
 		keys = append(keys, entry.Key)
@@ -154,9 +198,11 @@ func (s *Server) handleImport(w http.ResponseWriter, r *http.Request) {
 		normalized[i] = entry
 	}
 	if err := s.cache.StoreTranslations(r.Context(), normalized); err != nil {
+		s.logImport(r, len(req.Entries), http.StatusInternalServerError, err)
 		http.Error(w, "store translations: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
+	s.logImport(r, len(req.Entries), http.StatusOK, nil)
 	writeJSON(w, http.StatusOK, importResponse{Acknowledged: keys})
 }
 
@@ -183,12 +229,14 @@ type flightCall struct {
 	err    error
 }
 
-func (r *resolver) resolve(ctx context.Context, req resolveRequest) (map[string]string, int, error) {
+// resolve returns the translations, how many unique lines were already cached,
+// and how many were missing from the central cache when the request arrived.
+func (r *resolver) resolve(ctx context.Context, req resolveRequest) (map[string]string, int, int, error) {
 	if req.Provider == "" || req.SourceLang == "" || req.TargetLang == "" || len(req.Lines) == 0 {
-		return nil, 0, &requestError{"provider, languages, and lines are required"}
+		return nil, 0, 0, &requestError{"provider, languages, and lines are required"}
 	}
 	if len(req.Lines) > maxResolveLines {
-		return nil, 0, &requestError{"too many lines in one resolve request"}
+		return nil, 0, 0, &requestError{"too many lines in one resolve request"}
 	}
 	model := req.Model
 	seenIndexes := make(map[int]struct{}, len(req.Lines))
@@ -196,10 +244,10 @@ func (r *resolver) resolve(ctx context.Context, req resolveRequest) (map[string]
 	lineByKey := make(map[string]provider.Line, len(req.Lines))
 	for _, line := range req.Lines {
 		if line.Text == "" {
-			return nil, 0, &requestError{"line text cannot be empty"}
+			return nil, 0, 0, &requestError{"line text cannot be empty"}
 		}
 		if _, exists := seenIndexes[line.Index]; exists {
-			return nil, 0, &requestError{"line indexes must be unique"}
+			return nil, 0, 0, &requestError{"line indexes must be unique"}
 		}
 		seenIndexes[line.Index] = struct{}{}
 		key := cache.Key(req.Provider, model, req.SourceLang, req.TargetLang, line.Text)
@@ -211,7 +259,7 @@ func (r *resolver) resolve(ctx context.Context, req resolveRequest) (map[string]
 
 	hits, err := r.cache.LookupTranslations(ctx, keys)
 	if err != nil {
-		return nil, 0, err
+		return nil, 0, 0, err
 	}
 	initialHits := len(hits)
 	missingKeys := make([]string, 0, len(lineByKey))
@@ -221,11 +269,11 @@ func (r *resolver) resolve(ctx context.Context, req resolveRequest) (map[string]
 		}
 	}
 	if len(missingKeys) == 0 {
-		return hits, initialHits, nil
+		return hits, initialHits, 0, nil
 	}
 	prov, ok := r.providers[req.Provider]
 	if !ok {
-		return nil, initialHits, &requestError{fmt.Sprintf("provider %q is not configured on the shared node", req.Provider)}
+		return nil, initialHits, len(missingKeys), &requestError{fmt.Sprintf("provider %q is not configured on the shared node", req.Provider)}
 	}
 	if model == "" {
 		model = prov.DefaultModel()
@@ -278,12 +326,12 @@ func (r *resolver) resolve(ctx context.Context, req resolveRequest) (map[string]
 		return current, nil
 	})
 	if err != nil {
-		return nil, initialHits, err
+		return nil, initialHits, len(missingKeys), err
 	}
 	for key, value := range resolved {
 		hits[key] = value
 	}
-	return hits, initialHits, nil
+	return hits, initialHits, len(missingKeys), nil
 }
 
 func resolveFlightKey(providerName, model, sourceLang, targetLang string, keys []string) string {
