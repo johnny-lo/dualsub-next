@@ -21,6 +21,11 @@ const DEFAULT_STYLE: Required<OverlayStyle> = {
 
 const DEFAULT_POSITION: OverlayPosition = { x: 0.5, y: 0.84 }
 const POSITION_STORAGE_KEY = 'dualsubOverlayPosition'
+const REVEAL_STORAGE_KEY = 'dualsubOverlayRevealed'
+
+// A mousedown/mouseup pair within this many pixels is a click (toggle the
+// translation), anything further is a drag (reposition the overlay).
+const CLICK_MOVE_TOLERANCE_PX = 4
 
 function clamp(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, value))
@@ -40,7 +45,12 @@ export class SubtitleOverlay {
   private translations = new Map<string, string>()
   private dragging = false
   private dragOffsetFromCenter = { x: 0, y: 0 }
+  private dragStart = { x: 0, y: 0 }
   private position: OverlayPosition = { ...DEFAULT_POSITION }
+  // Original-only by default: the translation is one click away, so the
+  // reflex is to read the original first. Persisted across lectures/reloads.
+  private revealed = false
+  private lastTexts: string[] | null = null
   private readonly onFullscreenChange = () => {
     this.mountHost()
     window.requestAnimationFrame(() => this.applyPosition())
@@ -51,6 +61,7 @@ export class SubtitleOverlay {
 
   private onMouseDown = (e: MouseEvent) => {
     this.dragging = true
+    this.dragStart = { x: e.clientX, y: e.clientY }
     const rect = this.container.getBoundingClientRect()
     this.dragOffsetFromCenter = {
       x: e.clientX - (rect.left + rect.width / 2),
@@ -77,9 +88,14 @@ export class SubtitleOverlay {
     }
     this.applyPosition()
   }
-  private onMouseUp = () => {
+  private onMouseUp = (e: MouseEvent) => {
     if (!this.dragging) return
     this.dragging = false
+    const moved = Math.hypot(e.clientX - this.dragStart.x, e.clientY - this.dragStart.y)
+    if (moved <= CLICK_MOVE_TOLERANCE_PX) {
+      this.toggleRevealed()
+      return
+    }
     this.savePosition()
   }
 
@@ -107,9 +123,10 @@ export class SubtitleOverlay {
     document.addEventListener('fullscreenchange', this.onFullscreenChange)
     window.addEventListener('resize', this.onResize)
 
-    // Load saved appearance and normalized position from chrome.storage.
+    // Load saved appearance, normalized position, and reveal state.
     this.loadStyleFromStorage()
     this.loadPositionFromStorage()
+    this.loadRevealedFromStorage()
   }
 
   private buildCSS(s: Required<OverlayStyle>): string {
@@ -199,6 +216,33 @@ export class SubtitleOverlay {
     } catch {
       // storage not available (e.g. in tests)
     }
+  }
+
+  private loadRevealedFromStorage() {
+    try {
+      chrome.storage.local.get([REVEAL_STORAGE_KEY], (data) => {
+        if (typeof data[REVEAL_STORAGE_KEY] !== 'boolean') return
+        this.revealed = data[REVEAL_STORAGE_KEY] as boolean
+        // A cue may already be on screen by the time storage answers.
+        if (this.lastTexts) this.render(this.lastTexts)
+      })
+    } catch {
+      // storage not available (e.g. in tests)
+    }
+  }
+
+  /**
+   * Flip between original-only and bilingual. Re-renders the cue currently on
+   * screen so the translation appears immediately instead of on the next cue.
+   */
+  private toggleRevealed() {
+    this.revealed = !this.revealed
+    try {
+      void chrome.storage.local.set({ [REVEAL_STORAGE_KEY]: this.revealed })
+    } catch {
+      // storage not available (e.g. in tests)
+    }
+    if (this.lastTexts) this.render(this.lastTexts)
   }
 
   private getHostBounds(): DOMRect {
@@ -364,6 +408,7 @@ export class SubtitleOverlay {
   }
 
   render(originalTexts: string[] | null): void {
+    this.lastTexts = originalTexts
     this.linesEl.replaceChildren()
     if (!originalTexts || originalTexts.length === 0) {
       this.container.classList.add('empty')
@@ -378,7 +423,7 @@ export class SubtitleOverlay {
       orig.textContent = text
       const trans = document.createElement('div')
       trans.className = 'translated'
-      trans.textContent = this.lookupTranslation(text) ?? ''
+      trans.textContent = this.revealed ? (this.lookupTranslation(text) ?? '') : ''
       line.appendChild(orig)
       line.appendChild(trans)
       this.linesEl.appendChild(line)
