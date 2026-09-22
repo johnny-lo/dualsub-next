@@ -661,6 +661,31 @@ func TestSharedLookupRequiresToken(t *testing.T) {
 	}
 }
 
+func TestSharedLookupAcceptsMaxLinesBody(t *testing.T) {
+	ts := newTestServer(t, newTestCache(t), &mockProvider{})
+	lines := make([]provider.Line, 2000)
+	// 600 chars/line puts the encoded body at ~1.25 MB: comfortably over the
+	// old 1 MB cap (so this genuinely exercises the A1 fix) and under the new
+	// 8 MB one. 200 chars/line (~439 KB total) would not have crossed 1 MB.
+	for i := range lines {
+		lines[i] = provider.Line{Index: i, Text: strings.Repeat("x", 600)}
+	}
+	body, _ := json.Marshal(lookupRequest{SourceLang: "en", TargetLang: "zh-TW", Lines: lines})
+	req, err := http.NewRequest(http.MethodPost, ts.URL+"/v1/lookup", strings.NewReader(string(body)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Authorization", "Bearer test-token")
+	res, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", res.StatusCode)
+	}
+}
+
 func TestClientLookupTreatsNotFoundAsUnsupported(t *testing.T) {
 	ts := httptest.NewServer(http.NotFoundHandler())
 	t.Cleanup(ts.Close)

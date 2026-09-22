@@ -22,6 +22,7 @@ import (
 const (
 	maxResolveBody   = 1 << 20
 	maxImportBody    = 8 << 20
+	maxLookupBody    = 8 << 20
 	maxResolveLines  = 200
 	maxImportEntries = 2000
 	maxLookupLines   = 2000
@@ -217,7 +218,7 @@ func (s *Server) handleLookup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	start := time.Now()
-	r.Body = http.MaxBytesReader(w, r.Body, maxResolveBody)
+	r.Body = http.MaxBytesReader(w, r.Body, maxLookupBody)
 	var req lookupRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		s.logLookup(r, req, 0, start, http.StatusBadRequest, err)

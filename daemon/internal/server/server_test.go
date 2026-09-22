@@ -48,13 +48,15 @@ func (m *mockProvider) callCount() int {
 
 // fakeRemote stands in for the central node's lookup.
 type fakeRemote struct {
-	hits  map[string]string
-	err   error
-	calls int
+	hits     map[string]string
+	err      error
+	calls    int
+	received []provider.Line
 }
 
-func (f *fakeRemote) Lookup(_ context.Context, _, _ string, _ []provider.Line) (map[string]string, error) {
+func (f *fakeRemote) Lookup(_ context.Context, _, _ string, lines []provider.Line) (map[string]string, error) {
 	f.calls++
+	f.received = append(f.received, lines...)
 	if f.err != nil {
 		return nil, f.err
 	}
@@ -607,5 +609,52 @@ func TestLookupRejectsBadRequests(t *testing.T) {
 	res.Body.Close()
 	if res.StatusCode != http.StatusMethodNotAllowed {
 		t.Errorf("GET status = %d, want 405", res.StatusCode)
+	}
+}
+
+func TestLookupSkipsEmptyLinesAndNeverForwardsThem(t *testing.T) {
+	remote := &fakeRemote{hits: map[string]string{
+		cache.Key("", "", lookupSrc, lookupTgt, "World"): "世界",
+	}}
+	ctx := newTestServerWith(t, remote)
+	seedTranslation(t, ctx.cache, "Hello", "你好")
+
+	status, res := postLookup(t, ctx.ts, lookupRequest{
+		SourceLang: lookupSrc, TargetLang: lookupTgt,
+		Lines: []provider.Line{
+			{Index: 1, Text: "Hello"},
+			{Index: 2, Text: ""},
+			{Index: 3, Text: "World"},
+		},
+		IncludeRemote: true,
+	})
+	if status != http.StatusOK {
+		t.Fatalf("status = %d", status)
+	}
+	if res.Hits != 2 || res.Total != 3 {
+		t.Fatalf("response = %+v, want Hits=2 Total=3", res)
+	}
+	if remote.calls != 1 {
+		t.Fatalf("remote calls = %d, want 1", remote.calls)
+	}
+	if len(remote.received) != 1 || remote.received[0].Text != "World" {
+		t.Fatalf("remote received = %+v, want exactly one line with text World", remote.received)
+	}
+}
+
+func TestLookupAcceptsMaxLinesBody(t *testing.T) {
+	ctx := newTestServer(t)
+	lines := make([]provider.Line, 2000)
+	for i := range lines {
+		lines[i] = provider.Line{Index: i, Text: strings.Repeat("x", 200)}
+	}
+	status, res := postLookup(t, ctx.ts, lookupRequest{
+		SourceLang: lookupSrc, TargetLang: lookupTgt, Lines: lines,
+	})
+	if status != http.StatusOK {
+		t.Fatalf("status = %d, want 200", status)
+	}
+	if res.Total != 2000 {
+		t.Fatalf("total = %d, want 2000", res.Total)
 	}
 }

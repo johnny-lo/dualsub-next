@@ -16,6 +16,7 @@ import (
 // extension calls this on every page load, so a miss must be free.
 
 const maxLookupLines = 2000
+const maxLookupBody = 8 << 20
 
 type lookupRequest struct {
 	VideoKey      string          `json:"video_key,omitempty"`
@@ -38,7 +39,7 @@ func (s *Server) handleLookup(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "POST only", http.StatusMethodNotAllowed)
 		return
 	}
-	r.Body = http.MaxBytesReader(w, r.Body, maxTranslateBody)
+	r.Body = http.MaxBytesReader(w, r.Body, maxLookupBody)
 	var req lookupRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "invalid json: "+err.Error(), http.StatusBadRequest)
@@ -54,11 +55,20 @@ func (s *Server) handleLookup(w http.ResponseWriter, r *http.Request) {
 	}
 
 	ctx := r.Context()
+	// Lines with empty Text never reach the local cache or the central: the
+	// central rejects them with 400 (opening the circuit breaker), and there
+	// is nothing to translate anyway. keys[i] stays "" for those indices,
+	// which cache.Key never produces, so it safely never matches a hit.
 	keys := make([]string, len(req.Lines))
+	lookupKeys := make([]string, 0, len(req.Lines))
 	for i, l := range req.Lines {
+		if l.Text == "" {
+			continue
+		}
 		keys[i] = cache.Key("", "", req.SourceLang, req.TargetLang, l.Text)
+		lookupKeys = append(lookupKeys, keys[i])
 	}
-	hits, err := s.cache.LookupTranslations(ctx, keys)
+	hits, err := s.cache.LookupTranslations(ctx, lookupKeys)
 	if err != nil {
 		http.Error(w, "lookup translations: "+err.Error(), http.StatusInternalServerError)
 		return
@@ -82,9 +92,6 @@ func (s *Server) handleLookup(w http.ResponseWriter, r *http.Request) {
 					key := cache.Key("", "", req.SourceLang, req.TargetLang, l.Text)
 					translated, ok := found[key]
 					if !ok || translated == "" {
-						continue
-					}
-					if _, dup := hits[key]; dup {
 						continue
 					}
 					hits[key] = translated
@@ -134,6 +141,9 @@ func missingLines(lines []provider.Line, keys []string, hits map[string]string) 
 	seen := make(map[string]struct{}, len(lines))
 	var missing []provider.Line
 	for i, l := range lines {
+		if l.Text == "" {
+			continue
+		}
 		if _, ok := hits[keys[i]]; ok {
 			continue
 		}
