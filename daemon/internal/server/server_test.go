@@ -4,26 +4,35 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/johnny/dualsub-next/daemon/internal/cache"
 	"github.com/johnny/dualsub-next/daemon/internal/config"
 	"github.com/johnny/dualsub-next/daemon/internal/provider"
+	"github.com/johnny/dualsub-next/daemon/internal/sharedcache"
 	"github.com/johnny/dualsub-next/daemon/internal/translate"
 )
 
-type mockProvider struct{}
+type mockProvider struct {
+	mu    sync.Mutex
+	calls int
+}
 
 func (m *mockProvider) Name() string { return "mock" }
 
 func (m *mockProvider) DefaultModel() string { return "mock-model" }
 
 func (m *mockProvider) Translate(_ context.Context, in provider.Request) (provider.Response, error) {
+	m.mu.Lock()
+	m.calls++
+	m.mu.Unlock()
 	out := make([]provider.TranslatedLine, len(in.Lines))
 	for i, l := range in.Lines {
 		out[i] = provider.TranslatedLine{Index: l.Index, Text: "[t]" + l.Text}
@@ -31,14 +40,41 @@ func (m *mockProvider) Translate(_ context.Context, in provider.Request) (provid
 	return provider.Response{Lines: out}, nil
 }
 
+func (m *mockProvider) callCount() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.calls
+}
+
+// fakeRemote stands in for the central node's lookup.
+type fakeRemote struct {
+	hits  map[string]string
+	err   error
+	calls int
+}
+
+func (f *fakeRemote) Lookup(_ context.Context, _, _ string, _ []provider.Line) (map[string]string, error) {
+	f.calls++
+	if f.err != nil {
+		return nil, f.err
+	}
+	return f.hits, nil
+}
+
 type testServerCtx struct {
 	ts      *httptest.Server
 	cache   *cache.Cache
 	cfgPath string
 	cfg     *config.Config
+	mock    *mockProvider
 }
 
 func newTestServer(t *testing.T) *testServerCtx {
+	t.Helper()
+	return newTestServerWith(t, nil)
+}
+
+func newTestServerWith(t *testing.T, remote RemoteLookup) *testServerCtx {
 	t.Helper()
 	c, err := cache.Open(":memory:")
 	if err != nil {
@@ -46,7 +82,8 @@ func newTestServer(t *testing.T) *testServerCtx {
 	}
 	t.Cleanup(func() { c.Close() })
 
-	providers := map[string]provider.Provider{"mock": &mockProvider{}}
+	mock := &mockProvider{}
+	providers := map[string]provider.Provider{"mock": mock}
 	orch := translate.New(providers, c, translate.Config{
 		ChunkSize: 30, Concurrency: 1, MaxAttempts: 1,
 	})
@@ -66,12 +103,14 @@ func newTestServer(t *testing.T) *testServerCtx {
 		Cache:        c,
 		Config:       cfg,
 		ConfigPath:   cfgPath,
+		RemoteLookup: remote,
 	})
 	return &testServerCtx{
 		ts:      httptest.NewServer(s.http.Handler),
 		cache:   c,
 		cfgPath: cfgPath,
 		cfg:     cfg,
+		mock:    mock,
 	}
 }
 
@@ -397,4 +436,176 @@ func readSSEEvents(t *testing.T, r io.Reader) []sseEvent {
 		t.Fatal(err)
 	}
 	return events
+}
+
+const (
+	lookupSrc = "en"
+	lookupTgt = "繁體中文"
+)
+
+func seedTranslation(t *testing.T, c *cache.Cache, original, translated string) string {
+	t.Helper()
+	key := cache.Key("", "", lookupSrc, lookupTgt, original)
+	err := c.StoreTranslations(context.Background(), []cache.TranslationEntry{{
+		Key: key, Provider: "gemini", Model: "flash", SourceLang: lookupSrc, TargetLang: lookupTgt,
+		OriginalText: original, TranslatedText: translated,
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return key
+}
+
+func postLookup(t *testing.T, ts *httptest.Server, body lookupRequest) (int, lookupResponse) {
+	t.Helper()
+	raw, _ := json.Marshal(body)
+	res, err := http.Post(ts.URL+"/v1/lookup", "application/json", strings.NewReader(string(raw)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer res.Body.Close()
+	var payload lookupResponse
+	if res.StatusCode == http.StatusOK {
+		if err := json.NewDecoder(res.Body).Decode(&payload); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return res.StatusCode, payload
+}
+
+func twoLines() []provider.Line {
+	return []provider.Line{{Index: 1, Text: "Hello"}, {Index: 2, Text: "World"}}
+}
+
+func TestLookupReturnsCachedLinesWithoutTranslating(t *testing.T) {
+	ctx := newTestServer(t)
+	seedTranslation(t, ctx.cache, "Hello", "你好")
+
+	status, res := postLookup(t, ctx.ts, lookupRequest{
+		SourceLang: lookupSrc, TargetLang: lookupTgt, Lines: twoLines(), IncludeRemote: true,
+	})
+	if status != http.StatusOK {
+		t.Fatalf("status = %d", status)
+	}
+	if res.Hits != 1 || res.Total != 2 || res.RemoteStatus != "disabled" || res.RemoteHits != 0 {
+		t.Fatalf("response = %+v", res)
+	}
+	if len(res.Translations) != 1 || res.Translations[0].Index != 1 || res.Translations[0].Text != "你好" {
+		t.Fatalf("translations = %+v", res.Translations)
+	}
+	if calls := ctx.mock.callCount(); calls != 0 {
+		t.Fatalf("provider calls = %d, want 0", calls)
+	}
+	jobs, _ := ctx.cache.ListJobs(context.Background(), 10)
+	if len(jobs) != 0 {
+		t.Fatalf("lookup created %d job rows", len(jobs))
+	}
+}
+
+func TestLookupMergesRemoteHitsAndStoresThemLocally(t *testing.T) {
+	remote := &fakeRemote{hits: map[string]string{
+		cache.Key("", "", lookupSrc, lookupTgt, "World"): "世界",
+	}}
+	ctx := newTestServerWith(t, remote)
+	seedTranslation(t, ctx.cache, "Hello", "你好")
+
+	_, res := postLookup(t, ctx.ts, lookupRequest{
+		SourceLang: lookupSrc, TargetLang: lookupTgt, Lines: twoLines(), IncludeRemote: true,
+	})
+	if res.Hits != 2 || res.RemoteHits != 1 || res.RemoteStatus != "ok" {
+		t.Fatalf("response = %+v", res)
+	}
+	if remote.calls != 1 {
+		t.Fatalf("remote calls = %d, want 1 (only the misses)", remote.calls)
+	}
+	key := cache.Key("", "", lookupSrc, lookupTgt, "World")
+	local, _ := ctx.cache.LookupTranslations(context.Background(), []string{key})
+	if local[key] != "世界" {
+		t.Fatalf("remote hit was not stored locally: %v", local)
+	}
+	if pending, _ := ctx.cache.PendingSyncCount(context.Background()); pending != 0 {
+		t.Fatalf("remote hits must not be queued for upload, outbox = %d", pending)
+	}
+	if calls := ctx.mock.callCount(); calls != 0 {
+		t.Fatalf("provider calls = %d, want 0", calls)
+	}
+}
+
+func TestLookupSkipsRemoteWhenNothingIsMissing(t *testing.T) {
+	remote := &fakeRemote{}
+	ctx := newTestServerWith(t, remote)
+	seedTranslation(t, ctx.cache, "Hello", "你好")
+
+	_, res := postLookup(t, ctx.ts, lookupRequest{
+		SourceLang: lookupSrc, TargetLang: lookupTgt,
+		Lines: []provider.Line{{Index: 1, Text: "Hello"}}, IncludeRemote: true,
+	})
+	if res.Hits != 1 || res.RemoteStatus != "ok" || remote.calls != 0 {
+		t.Fatalf("response = %+v, remote calls = %d", res, remote.calls)
+	}
+}
+
+func TestLookupRespectsIncludeRemoteFalse(t *testing.T) {
+	remote := &fakeRemote{hits: map[string]string{cache.Key("", "", lookupSrc, lookupTgt, "World"): "世界"}}
+	ctx := newTestServerWith(t, remote)
+
+	_, res := postLookup(t, ctx.ts, lookupRequest{
+		SourceLang: lookupSrc, TargetLang: lookupTgt, Lines: twoLines(), IncludeRemote: false,
+	})
+	if res.Hits != 0 || res.RemoteStatus != "disabled" || remote.calls != 0 {
+		t.Fatalf("response = %+v, remote calls = %d", res, remote.calls)
+	}
+}
+
+func TestLookupTreatsOldCentralAsUnsupported(t *testing.T) {
+	ctx := newTestServerWith(t, &fakeRemote{err: sharedcache.ErrLookupUnsupported})
+	seedTranslation(t, ctx.cache, "Hello", "你好")
+
+	status, res := postLookup(t, ctx.ts, lookupRequest{
+		SourceLang: lookupSrc, TargetLang: lookupTgt, Lines: twoLines(), IncludeRemote: true,
+	})
+	if status != http.StatusOK || res.Hits != 1 || res.RemoteStatus != "unsupported" {
+		t.Fatalf("status=%d response=%+v", status, res)
+	}
+}
+
+func TestLookupReportsRemoteOutage(t *testing.T) {
+	ctx := newTestServerWith(t, &fakeRemote{err: errors.New("dial tcp: connection refused")})
+	seedTranslation(t, ctx.cache, "Hello", "你好")
+
+	status, res := postLookup(t, ctx.ts, lookupRequest{
+		SourceLang: lookupSrc, TargetLang: lookupTgt, Lines: twoLines(), IncludeRemote: true,
+	})
+	if status != http.StatusOK || res.Hits != 1 || res.RemoteStatus != "unavailable" {
+		t.Fatalf("status=%d response=%+v", status, res)
+	}
+}
+
+func TestLookupRejectsBadRequests(t *testing.T) {
+	ctx := newTestServer(t)
+	tooMany := make([]provider.Line, maxLookupLines+1)
+	for i := range tooMany {
+		tooMany[i] = provider.Line{Index: i, Text: "x"}
+	}
+	cases := []struct {
+		name string
+		body lookupRequest
+	}{
+		{"missing langs", lookupRequest{Lines: twoLines()}},
+		{"no lines", lookupRequest{SourceLang: lookupSrc, TargetLang: lookupTgt}},
+		{"too many lines", lookupRequest{SourceLang: lookupSrc, TargetLang: lookupTgt, Lines: tooMany}},
+	}
+	for _, tc := range cases {
+		if status, _ := postLookup(t, ctx.ts, tc.body); status != http.StatusBadRequest {
+			t.Errorf("%s: status = %d, want 400", tc.name, status)
+		}
+	}
+	res, err := http.Get(ctx.ts.URL + "/v1/lookup")
+	if err != nil {
+		t.Fatal(err)
+	}
+	res.Body.Close()
+	if res.StatusCode != http.StatusMethodNotAllowed {
+		t.Errorf("GET status = %d, want 405", res.StatusCode)
+	}
 }
