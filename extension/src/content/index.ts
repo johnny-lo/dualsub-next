@@ -1,8 +1,12 @@
 import { detectSite } from './extractors'
 import { ExtractError, type ActiveCue } from './extractors/types'
 import { SubtitleOverlay } from './overlay/SubtitleOverlay'
+import { DaemonClient } from '@/shared/DaemonClient'
 import type { TranslateHandlers, TranslateRequest } from '@/shared/DaemonClient'
+import { PREFERRED_SOURCE, TARGET_LANG } from '@/shared/langs'
 import { normalizeText } from '@/shared/transcript'
+import type { TranscriptEntry } from '@/shared/transcript'
+import { needsTranslation, prefetchCachedTranslations, type PrefetchResult } from './prefetch'
 import type {
   CaptionCandidate,
   CaptionSnapshot,
@@ -26,9 +30,14 @@ let cueDisposer: (() => void) | null = null
 let currentVideoKey: string | null = null
 let liveMode = false
 let liveProvider = ''
-let liveTargetLang = '繁體中文'
+let liveTargetLang = TARGET_LANG
 const inflightLive = new Set<string>()
 const TRANSLATE_PORT = 'dualsub-daemon-translate'
+
+// One-shot lookups go straight to the daemon: host_permissions covers
+// 127.0.0.1:7878 and the daemon sends Access-Control-Allow-Origin: *. Only
+// the SSE translate stream needs the background relay.
+const daemon = new DaemonClient()
 
 function translateViaBackground(
   request: TranslateRequest,
@@ -162,6 +171,36 @@ async function restoreOverlayFromStorage(): Promise<void> {
   startCueObserver()
 }
 
+// Cache-only prefetch for the current lecture. Shows whatever the daemon (or
+// the central node) already has; never translates. Returns null when the
+// transcript could not be extracted.
+async function prefetchCurrentLecture(): Promise<PrefetchResult | null> {
+  if (!extractor) return null
+  const videoKey = extractor.videoKey()
+  const result = await prefetchCachedTranslations({
+    videoKey,
+    sourceLang: PREFERRED_SOURCE,
+    targetLang: TARGET_LANG,
+    extract: () => extractor.extractFullTranscript(PREFERRED_SOURCE),
+    lookup: (req) => daemon.lookup(req),
+    apply: (translations) => {
+      // The user may have navigated away while the lookup was in flight.
+      if (extractor.videoKey() !== videoKey) return
+      currentVideoKey = videoKey
+      ensureOverlay().patchTranslations(translations)
+      startCueObserver()
+      void writeStoredTranslations(videoKey, translations, 'merge')
+    },
+    log: (message) => console.warn(`[DualSub] ${message}`),
+  })
+  if (result) {
+    console.log(
+      `[DualSub] prefetch ${videoKey}: ${result.hits}/${result.total} cached (remote: ${result.remoteStatus})`,
+    )
+  }
+  return result
+}
+
 function ensureOverlay(): SubtitleOverlay {
   if (!overlay) overlay = new SubtitleOverlay()
   return overlay
@@ -239,7 +278,7 @@ function startFullTranscriptTranslate(
   request: TranslateRequest,
 ) {
   currentVideoKey = videoKey
-  ensureOverlay().setTranslations({})
+  ensureOverlay()
   startCueObserver()
   fullTranslateStatus = {
     ok: true,
@@ -332,15 +371,13 @@ function startFullTranscriptTranslate(
   })
 }
 
-async function autoTranslateCurrentLecture(): Promise<void> {
+async function autoTranslateCurrentLecture(prefetched?: TranscriptEntry[]): Promise<void> {
   if (!extractor || extractor.site !== 'udemy' || !autoTranslateConfig) return
   const videoKey = extractor.videoKey()
   if (isCurrentFullTranslate(videoKey) && fullTranslateStatus.status === 'running') return
 
-  // Cache hit → restoreOverlayFromStorage already handled it; skip the daemon call.
-  const cached = await readStoredTranslations(videoKey)
-  if (cached) return
-
+  // Coverage is decided by the caller via needsTranslation(); the daemon
+  // still skips every cached line, so only real misses reach the provider.
   fullTranslateStatus = {
     ok: true,
     active: true,
@@ -358,16 +395,18 @@ async function autoTranslateCurrentLecture(): Promise<void> {
     updatedAt: Date.now(),
   }
 
-  let entries
-  try {
-    entries = await extractor.extractFullTranscript(autoTranslateConfig.sourceLang)
-  } catch (err) {
-    setFullTranslateStatus({
-      status: 'failed',
-      errorSummary: err instanceof Error ? err.message : String(err),
-    })
-    console.warn('[DualSub] auto-translate: extract failed:', err)
-    return
+  let entries = prefetched
+  if (!entries) {
+    try {
+      entries = await extractor.extractFullTranscript(autoTranslateConfig.sourceLang)
+    } catch (err) {
+      setFullTranslateStatus({
+        status: 'failed',
+        errorSummary: err instanceof Error ? err.message : String(err),
+      })
+      console.warn('[DualSub] auto-translate: extract failed:', err)
+      return
+    }
   }
   if (entries.length === 0) return
   if (!isCurrentFullTranslate(videoKey) || fullTranslateStatus.status !== 'running') return
@@ -734,10 +773,9 @@ const debugApi = {
 console.log('[DualSub] __dualsubDebug installed:', Object.keys(debugApi))
 
 // On load: restore the sticky auto-translate config first (so SPA nav after
-// a content-script restart still inherits user intent), then mount any
-// cached overlay. If no cache but autoTranslate is set for this fresh page,
-// kick off an auto-translate so the user doesn't have to click Translate
-// after a full reload.
+// a content-script restart still inherits user intent), mount any cached
+// overlay, prefetch what the daemon/central already have, and only then
+// auto-translate the remainder if the user opted in.
 async function bootstrap() {
   await new Promise<void>((resolve) => {
     chrome.storage.local.get([AUTO_TRANSLATE_KEY], (data) => {
@@ -747,8 +785,9 @@ async function bootstrap() {
     })
   })
   await restoreOverlayFromStorage()
-  if (!overlay && autoTranslateConfig) {
-    await autoTranslateCurrentLecture()
+  const coverage = await prefetchCurrentLecture()
+  if (autoTranslateConfig && needsTranslation(coverage)) {
+    await autoTranslateCurrentLecture(coverage?.entries)
   }
 }
 void bootstrap()
@@ -769,11 +808,11 @@ if (extractor?.site === 'udemy') {
     // try to query videoKey / well--text.
     setTimeout(async () => {
       await restoreOverlayFromStorage()
-      // If the new lecture wasn't cached but the user previously opted in to
-      // translation (autoTranslateConfig present), auto-fire a fresh
-      // translate so they don't have to click again on every lecture.
-      if (!overlay && autoTranslateConfig) {
-        await autoTranslateCurrentLecture()
+      const coverage = await prefetchCurrentLecture()
+      // The user opted in to translation earlier (autoTranslateConfig); fill
+      // whatever prefetch could not find so they never click per lecture.
+      if (autoTranslateConfig && needsTranslation(coverage)) {
+        await autoTranslateCurrentLecture(coverage?.entries)
       }
       // Re-arm live mode for the new lecture if it was on previously.
       if (liveMode) {
