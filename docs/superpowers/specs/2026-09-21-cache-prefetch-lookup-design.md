@@ -27,8 +27,10 @@ question "do we already have this?".
 - Looking up legacy language-pair spellings. The cache holds 1592 older
   `en → zh-TW` rows next to 9363 `en → 繁體中文` rows; only the current pair is
   queried.
-- Netflix-specific work. Prefetch runs wherever `extractFullTranscript()`
-  already works; Udemy is the tested path.
+- Netflix-specific work. Prefetch is gated to Udemy for now (same as
+  auto-translate): Netflix's `extractFullTranscript()` blocks up to 8s and
+  throws unless subtitles are already on, which would stall every watch page
+  for no benefit yet.
 
 ## Design
 
@@ -65,8 +67,9 @@ the hits, never touch a provider.
 ← { translations: { cache_key: text }, cache_hits }
 ```
 
-Keeps resolve's legacy-key aliasing so a mid-rollout client still matches.
-Requires the bearer token like every other route on that listener.
+No legacy-key aliasing: legacy keys need provider+model, which lookup does not
+carry, and every lookup client is new code using shared-v2 keys. Requires the
+bearer token like every other route on that listener.
 
 ### 3. Shared-cache client: `Client.Lookup()`
 
@@ -96,7 +99,9 @@ Requires the bearer token like every other route on that listener.
   4. never start a translation.
 - Order on load: restore from storage (instant) → prefetch fills gaps → sticky
   auto-translate if configured **and the lecture is not fully covered**.
-- One prefetch in flight per `videoKey`; dropped on SPA navigation away.
+- One prefetch in flight per `videoKey`; dropped on SPA navigation away. The
+  returned coverage is also discarded if `videoKey` changed while the lookup
+  was in flight, so stale entries are never fed to auto-translate.
 - Extraction failure or daemon offline: log and no-op. Prefetch must never
   break the overlay or the existing flows.
 
@@ -173,6 +178,20 @@ translated, same as today.
 Implementation: `prefetchCachedTranslations()` returns `{hits, total}`;
 `autoTranslateCurrentLecture()` takes that result instead of re-reading
 storage and skips only when `hits === total`.
+
+Without a further check, a lecture with one line the provider never returns
+(e.g. it consistently errors or the model refuses it) would re-run
+auto-translate — and re-issue provider calls for that same straggler line —
+on every page load and every SPA lecture switch, forever, since `hits < total`
+stays true. To bound this, `loadCurrentLecture()` records a storage-backed
+attempt marker (`dualsubAutoTranslateAttempts`, keyed by `videoKey`, holding
+`{hits, total, at}`) right before calling `autoTranslateCurrentLecture()`. On
+the next load, auto-translate is skipped if a marker already exists for the
+videoKey with the *same* `hits`/`total` pair — one attempt per distinct
+coverage outcome. If coverage later changes (the central acquires the missing
+line, say), `hits`/`total` no longer match the marker and auto-translate
+retries. The marker is cleared, like the sticky config, when the user
+explicitly clears the overlay (`CLEAR_OVERLAY`, not SPA navigation).
 
 ## Related work
 

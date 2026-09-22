@@ -3,6 +3,7 @@ package sharedcache
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -611,6 +612,121 @@ func TestSyncOutboxLogsUploadFailureOncePerOutage(t *testing.T) {
 	failed := lg.byKind("shared_upload_failed")
 	if len(failed) != 1 || failed[0]["entries"] != 1 || failed[0]["error"] == "" {
 		t.Fatalf("shared_upload_failed events = %v, want one per outage", failed)
+	}
+}
+
+func TestSharedLookupReturnsHitsWithoutTranslating(t *testing.T) {
+	ctx := context.Background()
+	central := newTestCache(t)
+	p := &mockProvider{}
+	lg := &recordingLogger{}
+	ts := newLoggedTestServer(t, central, p, lg)
+	entry := cache.TranslationEntry{
+		SourceLang: "en", TargetLang: "zh-TW", OriginalText: "Hello", TranslatedText: "你好",
+	}
+	entry.Key = cache.Key("", "", entry.SourceLang, entry.TargetLang, entry.OriginalText)
+	if err := central.StoreTranslations(ctx, []cache.TranslationEntry{entry}); err != nil {
+		t.Fatal(err)
+	}
+	client := newTestClient(t, ts.URL, "test-token")
+
+	hits, err := client.Lookup(ctx, "en", "zh-TW", []provider.Line{
+		{Index: 1, Text: "Hello"}, {Index: 2, Text: "World"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(hits) != 1 || hits[entry.Key] != "你好" {
+		t.Fatalf("hits = %v, want only the cached line", hits)
+	}
+	if calls := p.callCount(); calls != 0 {
+		t.Fatalf("provider calls = %d, want 0: lookup must never translate", calls)
+	}
+	events := lg.byKind("shared_lookup")
+	if len(events) != 1 || events[0]["lines"] != 2 || events[0]["cache_hits"] != 1 || events[0]["status"] != http.StatusOK {
+		t.Fatalf("shared_lookup events = %v", events)
+	}
+}
+
+func TestSharedLookupRequiresToken(t *testing.T) {
+	ts := newTestServer(t, newTestCache(t), &mockProvider{})
+	body, _ := json.Marshal(lookupRequest{SourceLang: "en", TargetLang: "zh-TW", Lines: []provider.Line{{Index: 1, Text: "Hello"}}})
+	res, err := http.Post(ts.URL+"/v1/lookup", "application/json", strings.NewReader(string(body)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401", res.StatusCode)
+	}
+}
+
+func TestSharedLookupAcceptsMaxLinesBody(t *testing.T) {
+	ts := newTestServer(t, newTestCache(t), &mockProvider{})
+	lines := make([]provider.Line, 2000)
+	// 600 chars/line puts the encoded body at ~1.25 MB: comfortably over the
+	// old 1 MB cap (so this genuinely exercises the A1 fix) and under the new
+	// 8 MB one. 200 chars/line (~439 KB total) would not have crossed 1 MB.
+	for i := range lines {
+		lines[i] = provider.Line{Index: i, Text: strings.Repeat("x", 600)}
+	}
+	body, _ := json.Marshal(lookupRequest{SourceLang: "en", TargetLang: "zh-TW", Lines: lines})
+	req, err := http.NewRequest(http.MethodPost, ts.URL+"/v1/lookup", strings.NewReader(string(body)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Authorization", "Bearer test-token")
+	res, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", res.StatusCode)
+	}
+}
+
+func TestClientLookupTreatsNotFoundAsUnsupported(t *testing.T) {
+	ts := httptest.NewServer(http.NotFoundHandler())
+	t.Cleanup(ts.Close)
+	client, err := NewClient(ClientOptions{
+		BaseURL: ts.URL, Token: "test-token", ConnectTimeout: 50 * time.Millisecond,
+		RequestTimeout: time.Second, RetryDelay: time.Minute,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = client.Lookup(context.Background(), "en", "zh-TW", []provider.Line{{Index: 1, Text: "Hello"}})
+	if !errors.Is(err, ErrLookupUnsupported) {
+		t.Fatalf("err = %v, want ErrLookupUnsupported", err)
+	}
+	if err := client.available(); err != nil {
+		t.Fatalf("an old central must not open the circuit, got %v", err)
+	}
+}
+
+func TestClientLookupOutageOpensCircuit(t *testing.T) {
+	client, err := NewClient(ClientOptions{
+		BaseURL: "http://127.0.0.1:1", Token: "test-token", ConnectTimeout: 50 * time.Millisecond,
+		RequestTimeout: time.Second, RetryDelay: time.Minute,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = client.Lookup(context.Background(), "en", "zh-TW", []provider.Line{{Index: 1, Text: "Hello"}})
+	if err == nil || errors.Is(err, ErrLookupUnsupported) {
+		t.Fatalf("err = %v, want a network failure", err)
+	}
+	if err := client.available(); !errors.Is(err, errCircuitOpen) {
+		t.Fatalf("circuit should be open after an outage, got %v", err)
+	}
+}
+
+func TestClientLookupEmptyLinesSkipsNetwork(t *testing.T) {
+	client := newTestClient(t, "http://127.0.0.1:1", "test-token")
+	hits, err := client.Lookup(context.Background(), "en", "zh-TW", nil)
+	if err != nil || len(hits) != 0 {
+		t.Fatalf("hits=%v err=%v, want empty and nil", hits, err)
 	}
 }
 

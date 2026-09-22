@@ -18,7 +18,24 @@ import (
 	"github.com/johnny/dualsub-next/daemon/internal/provider"
 )
 
-var errCircuitOpen = errors.New("shared cache temporarily unavailable")
+var (
+	errCircuitOpen = errors.New("shared cache temporarily unavailable")
+	// ErrLookupUnsupported means the central node predates /v1/lookup. Callers
+	// treat it as "no remote hits", never as an outage.
+	ErrLookupUnsupported = errors.New("shared cache node does not support lookup")
+)
+
+// lookupTimeout bounds a cache read; translate-sized timeouts do not apply.
+const lookupTimeout = 10 * time.Second
+
+type httpStatusError struct {
+	status  int
+	message string
+}
+
+func (e *httpStatusError) Error() string {
+	return fmt.Sprintf("shared cache HTTP %d: %s", e.status, e.message)
+}
 
 type ClientOptions struct {
 	BaseURL        string
@@ -131,6 +148,34 @@ func (c *Client) Import(ctx context.Context, entries []cache.TranslationEntry) (
 	return payload.Acknowledged, nil
 }
 
+// Lookup returns cache_key → translated_text for lines the central already
+// has. It never causes the central to translate.
+func (c *Client) Lookup(ctx context.Context, sourceLang, targetLang string, lines []provider.Line) (map[string]string, error) {
+	if len(lines) == 0 {
+		return map[string]string{}, nil
+	}
+	if err := c.available(); err != nil {
+		return nil, err
+	}
+	ctx, cancel := context.WithTimeout(ctx, lookupTimeout)
+	defer cancel()
+	var payload lookupResponse
+	err := c.post(ctx, "/v1/lookup", lookupRequest{SourceLang: sourceLang, TargetLang: targetLang, Lines: lines}, &payload)
+	var httpErr *httpStatusError
+	if errors.As(err, &httpErr) && httpErr.status == http.StatusNotFound {
+		return nil, ErrLookupUnsupported
+	}
+	if err != nil {
+		c.markUnavailable()
+		return nil, err
+	}
+	c.markAvailable()
+	if payload.Translations == nil {
+		payload.Translations = map[string]string{}
+	}
+	return payload.Translations, nil
+}
+
 func (c *Client) post(ctx context.Context, path string, body any, out any) error {
 	encoded, err := json.Marshal(body)
 	if err != nil {
@@ -149,7 +194,7 @@ func (c *Client) post(ctx context.Context, path string, body any, out any) error
 	defer res.Body.Close()
 	if res.StatusCode < 200 || res.StatusCode >= 300 {
 		message, _ := io.ReadAll(io.LimitReader(res.Body, 4096))
-		return fmt.Errorf("shared cache HTTP %d: %s", res.StatusCode, strings.TrimSpace(string(message)))
+		return &httpStatusError{status: res.StatusCode, message: strings.TrimSpace(string(message))}
 	}
 	if err := json.NewDecoder(io.LimitReader(res.Body, 8<<20)).Decode(out); err != nil {
 		return fmt.Errorf("decode shared cache response: %w", err)

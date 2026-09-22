@@ -145,6 +145,12 @@ Or run: dualsub config init`, *cfgPath)
 		MaxAttempts: cfg.Translate.MaxAttempts,
 	})
 
+	// A nil *Client stored in an interface is non-nil; only assign when set.
+	var remoteLookup server.RemoteLookup
+	if remoteCache != nil {
+		remoteLookup = remoteCache
+	}
+
 	srv := server.New(server.Options{
 		Addr:         cfg.Server.Listen,
 		Orchestrator: orch,
@@ -153,6 +159,7 @@ Or run: dualsub config init`, *cfgPath)
 		Config:       cfg,
 		ConfigPath:   *cfgPath,
 		Logger:       lg,
+		RemoteLookup: remoteLookup,
 	})
 	var syncServer *sharedcache.Server
 	if cfg.Sync.Listen != "" {

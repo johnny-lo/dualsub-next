@@ -21,6 +21,24 @@ export interface TranslateRequest {
   lines: Array<{ index: number; text: string }>
 }
 
+export type RemoteStatus = 'disabled' | 'ok' | 'unsupported' | 'unavailable'
+
+export interface LookupRequest {
+  video_key?: string
+  source_lang: string
+  target_lang: string
+  lines: Array<{ index: number; text: string }>
+  include_remote: boolean
+}
+
+export interface LookupResponse {
+  translations: TranslatedLine[]
+  hits: number
+  total: number
+  remote_hits: number
+  remote_status: RemoteStatus
+}
+
 export interface JobCreatedPayload {
   job_id: string
   total_chunks: number
@@ -134,6 +152,25 @@ export class DaemonClient {
       const text = await res.text().catch(() => '')
       throw new Error(`HTTP ${res.status}: ${text}`)
     }
+  }
+
+  /**
+   * Cache-only: which of these lines already have a translation, locally or
+   * on the central node. Never triggers a translation, so it is safe to call
+   * on every page load.
+   */
+  async lookup(req: LookupRequest): Promise<LookupResponse> {
+    const res = await fetch(`${this.baseURL}/v1/lookup`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(req),
+      signal: AbortSignal.timeout(10_000),
+    })
+    if (!res.ok) {
+      const text = await res.text().catch(() => '')
+      throw new Error(`HTTP ${res.status}: ${text}`)
+    }
+    return res.json()
   }
 
   /**
