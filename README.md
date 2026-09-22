@@ -187,6 +187,7 @@ cd extension && npm run build
 | DELETE | `/v1/jobs`           | clear job history only; keeps translation cache |
 | GET    | `/v1/config`         | current daemon config                          |
 | PUT    | `/v1/config`         | persist config to TOML (restart to apply)      |
+| POST   | `/v1/lookup`         | cache-only: which lines already have a translation (local + central); never translates |
 
 The optional shared-cache listener uses a separate address and requires
 `Authorization: Bearer <sync token>` on every request:
@@ -196,6 +197,7 @@ The optional shared-cache listener uses a separate address and requires
 | GET    | `/healthz`    | authenticated shared-listener liveness             |
 | POST   | `/v1/resolve` | resolve from central cache or translate centrally |
 | POST   | `/v1/import`  | idempotently import offline local translations    |
+| POST   | `/v1/lookup`  | cache-only lookup for clients; never translates          |
 
 Shared-cache traffic is recorded in the daemon's JSONL log (`daemon.log` next
 to the cache database, also mirrored to stderr), so you can confirm that clients
@@ -211,6 +213,8 @@ really fetch from and upload to the central node:
 | client  | `shared_upload`         | outbox batch acknowledged by the central node                  |
 | client  | `shared_upload_failed`  | outbox upload failed (logged once per outage)                  |
 | client  | `shared_history_queued` | pre-existing local translations queued for the first upload    |
+| local   | `lookup`                | page-load prefetch: `hits`/`lines` found locally, `remote_hits`, `remote_status` |
+| central | `shared_lookup`         | a client asked which lines exist; `cache_hits` of `lines`     |
 
 ```bash
 grep '"kind":"shared_' ~/.local/share/dualsub/daemon.log | tail
