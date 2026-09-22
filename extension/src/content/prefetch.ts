@@ -26,6 +26,7 @@ export interface PrefetchResult {
   total: number
   /** 'error' = the daemon lookup itself failed (offline, or too old for /v1/lookup). */
   remoteStatus: RemoteStatus | 'error'
+  videoKey: string
 }
 
 /** True when sticky auto-translate still has lines to fill. */
@@ -43,7 +44,7 @@ export async function prefetchCachedTranslations(deps: PrefetchDeps): Promise<Pr
     return null
   }
   if (entries.length === 0) {
-    return { entries, hits: 0, total: 0, remoteStatus: 'disabled' }
+    return { entries, hits: 0, total: 0, remoteStatus: 'disabled', videoKey: deps.videoKey }
   }
 
   let res: LookupResponse
@@ -57,17 +58,21 @@ export async function prefetchCachedTranslations(deps: PrefetchDeps): Promise<Pr
     })
   } catch (err) {
     deps.log?.(`prefetch: lookup failed: ${err instanceof Error ? err.message : String(err)}`)
-    return { entries, hits: 0, total: entries.length, remoteStatus: 'error' }
+    return { entries, hits: 0, total: entries.length, remoteStatus: 'error', videoKey: deps.videoKey }
   }
 
-  const byIndex = new Map<number, string>()
-  for (const e of entries) byIndex.set(e.index, e.originalText)
-  const translations: Record<string, string> = {}
-  for (const t of res.translations) {
-    const original = byIndex.get(t.index)
-    if (original) translations[original] = t.text
+  try {
+    const byIndex = new Map<number, string>()
+    for (const e of entries) byIndex.set(e.index, e.originalText)
+    const translations: Record<string, string> = {}
+    for (const t of res.translations) {
+      const original = byIndex.get(t.index)
+      if (original !== undefined) translations[original] = t.text
+    }
+    if (Object.keys(translations).length > 0) deps.apply(translations)
+  } catch (err) {
+    deps.log?.(`prefetch: apply failed: ${err instanceof Error ? err.message : String(err)}`)
   }
-  if (Object.keys(translations).length > 0) deps.apply(translations)
 
-  return { entries, hits: res.hits, total: res.total, remoteStatus: res.remote_status }
+  return { entries, hits: res.hits, total: res.total, remoteStatus: res.remote_status, videoKey: deps.videoKey }
 }

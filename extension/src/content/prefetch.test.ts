@@ -40,7 +40,7 @@ describe('prefetchCachedTranslations', () => {
     const d = deps()
     const result = await prefetchCachedTranslations(d)
     expect(d.apply).toHaveBeenCalledWith({ Hello: '你好' })
-    expect(result).toEqual({ entries, hits: 1, total: 2, remoteStatus: 'disabled' })
+    expect(result).toEqual({ entries, hits: 1, total: 2, remoteStatus: 'disabled', videoKey: 'udemy:course/1' })
     expect(d.lookup).toHaveBeenCalledWith({
       video_key: 'udemy:course/1',
       source_lang: 'en',
@@ -85,6 +85,7 @@ describe('prefetchCachedTranslations', () => {
       hits: 0,
       total: 0,
       remoteStatus: 'disabled',
+      videoKey: 'udemy:course/1',
     })
     expect(d.lookup).not.toHaveBeenCalled()
   })
@@ -98,9 +99,20 @@ describe('prefetchCachedTranslations', () => {
       log,
     })
     const result = await prefetchCachedTranslations(d)
-    expect(result).toEqual({ entries, hits: 0, total: 2, remoteStatus: 'error' })
+    expect(result).toEqual({ entries, hits: 0, total: 2, remoteStatus: 'error', videoKey: 'udemy:course/1' })
     expect(d.apply).not.toHaveBeenCalled()
     expect(log).toHaveBeenCalledWith(expect.stringContaining('HTTP 404'))
+  })
+
+  it('still returns coverage when apply throws, and logs the failure', async () => {
+    const log = vi.fn()
+    const apply = vi.fn(() => {
+      throw new Error('overlay not ready')
+    })
+    const d = deps({ apply, log })
+    const result = await prefetchCachedTranslations(d)
+    expect(result).toEqual({ entries, hits: 1, total: 2, remoteStatus: 'disabled', videoKey: 'udemy:course/1' })
+    expect(log).toHaveBeenCalledWith(expect.stringContaining('overlay not ready'))
   })
 })
 
@@ -109,12 +121,18 @@ describe('needsTranslation', () => {
     expect(needsTranslation(null)).toBe(true)
   })
   it('is true when some lines are missing', () => {
-    expect(needsTranslation({ entries, hits: 1, total: 2, remoteStatus: 'ok' })).toBe(true)
+    expect(
+      needsTranslation({ entries, hits: 1, total: 2, remoteStatus: 'ok', videoKey: 'udemy:course/1' }),
+    ).toBe(true)
   })
   it('is false when every line was found', () => {
-    expect(needsTranslation({ entries, hits: 2, total: 2, remoteStatus: 'ok' })).toBe(false)
+    expect(
+      needsTranslation({ entries, hits: 2, total: 2, remoteStatus: 'ok', videoKey: 'udemy:course/1' }),
+    ).toBe(false)
   })
   it('is false for an empty transcript (nothing to translate)', () => {
-    expect(needsTranslation({ entries: [], hits: 0, total: 0, remoteStatus: 'disabled' })).toBe(false)
+    expect(
+      needsTranslation({ entries: [], hits: 0, total: 0, remoteStatus: 'disabled', videoKey: 'udemy:course/1' }),
+    ).toBe(false)
   })
 })

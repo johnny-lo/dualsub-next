@@ -164,6 +164,7 @@ export class DaemonClient {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(req),
+      signal: AbortSignal.timeout(10_000),
     })
     if (!res.ok) {
       const text = await res.text().catch(() => '')
