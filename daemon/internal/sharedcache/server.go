@@ -24,6 +24,7 @@ const (
 	maxImportBody    = 8 << 20
 	maxResolveLines  = 200
 	maxImportEntries = 2000
+	maxLookupLines   = 2000
 )
 
 type ServerOptions struct {
@@ -55,6 +56,7 @@ func NewServer(opts ServerOptions) *Server {
 	mux.HandleFunc("/healthz", s.auth(s.handleHealth))
 	mux.HandleFunc("/v1/resolve", s.auth(s.handleResolve))
 	mux.HandleFunc("/v1/import", s.auth(s.handleImport))
+	mux.HandleFunc("/v1/lookup", s.auth(s.handleLookup))
 	s.http = &http.Server{
 		Addr: opts.Addr, Handler: mux, ReadHeaderTimeout: 5 * time.Second,
 	}
@@ -204,6 +206,63 @@ func (s *Server) handleImport(w http.ResponseWriter, r *http.Request) {
 	}
 	s.logImport(r, len(req.Entries), http.StatusOK, nil)
 	writeJSON(w, http.StatusOK, importResponse{Acknowledged: keys})
+}
+
+// handleLookup answers "which of these lines do you already have?" from the
+// cache alone. Unlike resolve it never falls through to a provider, so a
+// client can call it on every page load without risking spend.
+func (s *Server) handleLookup(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	start := time.Now()
+	r.Body = http.MaxBytesReader(w, r.Body, maxResolveBody)
+	var req lookupRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		s.logLookup(r, req, 0, start, http.StatusBadRequest, err)
+		http.Error(w, "invalid json: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	reject := func(message string) {
+		s.logLookup(r, req, 0, start, http.StatusBadRequest, errors.New(message))
+		http.Error(w, message, http.StatusBadRequest)
+	}
+	if req.SourceLang == "" || req.TargetLang == "" || len(req.Lines) == 0 {
+		reject("languages and lines are required")
+		return
+	}
+	if len(req.Lines) > maxLookupLines {
+		reject("too many lines in one lookup request")
+		return
+	}
+	keys := make([]string, 0, len(req.Lines))
+	for _, line := range req.Lines {
+		if line.Text == "" {
+			reject("line text cannot be empty")
+			return
+		}
+		keys = append(keys, cache.Key("", "", req.SourceLang, req.TargetLang, line.Text))
+	}
+	hits, err := s.cache.LookupTranslations(r.Context(), keys)
+	if err != nil {
+		s.logLookup(r, req, 0, start, http.StatusInternalServerError, err)
+		http.Error(w, "lookup translations: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	s.logLookup(r, req, len(hits), start, http.StatusOK, nil)
+	writeJSON(w, http.StatusOK, lookupResponse{Translations: hits, CacheHits: len(hits)})
+}
+
+func (s *Server) logLookup(r *http.Request, req lookupRequest, hits int, start time.Time, status int, err error) {
+	fields := map[string]any{
+		"remote": remoteIP(r), "lines": len(req.Lines), "cache_hits": hits, "status": status,
+		"duration_ms": time.Since(start).Milliseconds(),
+	}
+	if err != nil {
+		fields["error"] = err.Error()
+	}
+	s.log.Event("shared_lookup", fields)
 }
 
 func writeJSON(w http.ResponseWriter, status int, value any) {

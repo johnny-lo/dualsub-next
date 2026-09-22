@@ -65,8 +65,9 @@ the hits, never touch a provider.
 ← { translations: { cache_key: text }, cache_hits }
 ```
 
-Keeps resolve's legacy-key aliasing so a mid-rollout client still matches.
-Requires the bearer token like every other route on that listener.
+No legacy-key aliasing: legacy keys need provider+model, which lookup does not
+carry, and every lookup client is new code using shared-v2 keys. Requires the
+bearer token like every other route on that listener.
 
 ### 3. Shared-cache client: `Client.Lookup()`
 

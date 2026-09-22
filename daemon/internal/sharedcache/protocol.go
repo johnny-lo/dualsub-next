@@ -25,3 +25,17 @@ type importRequest struct {
 type importResponse struct {
 	Acknowledged []string `json:"acknowledged"`
 }
+
+// lookupRequest asks the central cache for existing translations only; the
+// central never translates for it. Keys are provider-independent, so no
+// provider or model is carried.
+type lookupRequest struct {
+	SourceLang string          `json:"source_lang"`
+	TargetLang string          `json:"target_lang"`
+	Lines      []provider.Line `json:"lines"`
+}
+
+type lookupResponse struct {
+	Translations map[string]string `json:"translations"`
+	CacheHits    int               `json:"cache_hits"`
+}
