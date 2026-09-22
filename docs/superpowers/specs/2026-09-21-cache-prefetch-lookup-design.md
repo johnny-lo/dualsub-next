@@ -21,8 +21,9 @@ question "do we already have this?".
 
 ## Non-goals
 
-- Changing when auto-translate spends tokens. Sticky auto-translate keeps its
-  current behavior (see "Deliberately unchanged").
+- Spending tokens on lines the cache already has. Sticky auto-translate still
+  only runs when the user opted in, and `/v1/translate` already skips cached
+  lines per line (see "Auto-translate after a partial hit").
 - Looking up legacy language-pair spellings. The cache holds 1592 older
   `en → zh-TW` rows next to 9363 `en → 繁體中文` rows; only the current pair is
   queried.
@@ -94,7 +95,7 @@ Requires the bearer token like every other route on that listener.
      `chrome.storage.local` via the existing serialized write chain,
   4. never start a translation.
 - Order on load: restore from storage (instant) → prefetch fills gaps → sticky
-  auto-translate if configured.
+  auto-translate if configured **and the lecture is not fully covered**.
 - One prefetch in flight per `videoKey`; dropped on SPA navigation away.
 - Extraction failure or daemon offline: log and no-op. Prefetch must never
   break the overlay or the existing flows.
@@ -111,7 +112,7 @@ page load / SPA nav
                                  └─► central POST /v1/lookup (cache-only)
                                         └─► hits stored locally, no outbox
         hits → overlay + chrome.storage.local
-  → autoTranslateCurrentLecture()          (existing, only if opted in)
+  → autoTranslateCurrentLecture()          (only if opted in AND hits < total)
 ```
 
 ## Observability
@@ -154,12 +155,24 @@ Manual: load a cached Udemy lecture with the daemon running and confirm
 subtitles appear with no `translate_start` in `daemon.log`, then check for a
 `lookup` event.
 
-## Deliberately unchanged
+## Auto-translate after a partial hit
 
-`autoTranslateCurrentLecture()` returns early when storage holds **any**
-cached lines for the lecture, so a partial prefetch hit will also suppress
-auto-translate for that lecture. Changing it would make page loads spend codex
-tokens more often; it is a separate decision.
+Today `autoTranslateCurrentLecture()` returns early when storage holds **any**
+cached lines for the lecture. That was fine while storage was either empty or
+the output of a complete translate job. Prefetch makes "the central had 60% of
+the lines" a common state, and with the old check sticky auto-translate would
+silently skip those lectures — prefetch would break the flow the user opted
+into.
+
+New rule: after prefetch, if the user has an `autoTranslateConfig` and
+`hits < total`, run auto-translate for the lecture. Cost is bounded: the
+orchestrator looks every line up in the cache before chunking, so only the
+missing lines reach the provider. Without `autoTranslateConfig` nothing is
+translated, same as today.
+
+Implementation: `prefetchCachedTranslations()` returns `{hits, total}`;
+`autoTranslateCurrentLecture()` takes that result instead of re-reading
+storage and skips only when `hits === total`.
 
 ## Related work
 
