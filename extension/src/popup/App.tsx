@@ -46,6 +46,7 @@ import {
   type JobSummary,
   type ProviderInfo,
 } from '@/shared/DaemonClient'
+import { buildStartCommand, isWindowsPlatform } from './startCommand'
 
 const TARGET_LANG = '繁體中文'
 const PREFERRED_SOURCE = 'en'
@@ -98,24 +99,6 @@ const sectionTitleStyle: CSSProperties = {
   marginBottom: 8,
 }
 
-function buildStartCommand(installDir: string | null): string {
-  const ua = navigator.userAgent
-  const uaPlatform = (navigator as { userAgentData?: { platform?: string } }).userAgentData?.platform ?? ''
-  const isWindows = /windows/i.test(uaPlatform) || /windows/i.test(ua)
-  if (isWindows) {
-    const script = '.\\dualsub-watch.ps1'
-    if (!installDir) return script
-    // PowerShell single-quoted strings escape a quote by doubling it.
-    const quoted = installDir.replaceAll("'", "''")
-    return `cd '${quoted}'; ${script}`
-  }
-  const script = './dualsub-watch.sh'
-  if (!installDir) return script
-  // POSIX shell: close the quote, add an escaped quote, reopen.
-  const quoted = installDir.replaceAll("'", "'\\''")
-  return `cd '${quoted}' && ${script}`
-}
-
 function compactVideoKey(videoKey?: string | null): string {
   if (!videoKey) return 'No current video'
   return videoKey.replace(/^udemy:/, 'Udemy · ').replace(/^netflix:/, 'Netflix · ')
@@ -165,7 +148,10 @@ export default function App() {
   const [pasteText, setPasteText] = useState('')
   const [pasteResult, setPasteResult] = useState<{ ok: boolean; message: string } | null>(null)
   const [installDir, setInstallDir] = useState<string | null>(null)
-  const startCommand = useMemo(() => buildStartCommand(installDir), [installDir])
+  const startCommand = useMemo(
+    () => buildStartCommand(installDir, isWindowsPlatform(navigator)),
+    [installDir],
+  )
   const [copiedStart, setCopiedStart] = useState(false)
   const [snapshot, setSnapshot] = useState('')
   const [snapshotState, setSnapshotState] = useState<'idle' | 'working' | 'copied'>('idle')
