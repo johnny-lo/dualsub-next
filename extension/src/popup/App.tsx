@@ -46,10 +46,8 @@ import {
   type JobSummary,
   type ProviderInfo,
 } from '@/shared/DaemonClient'
+import { PREFERRED_SOURCE, TARGET_LANG } from '@/shared/langs'
 import { buildStartCommand, isWindowsPlatform } from './startCommand'
-
-const TARGET_LANG = '繁體中文'
-const PREFERRED_SOURCE = 'en'
 
 type DaemonStatus =
   | { state: 'checking' }
