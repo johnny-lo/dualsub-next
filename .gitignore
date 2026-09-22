@@ -2,6 +2,9 @@
 # Loose binary if user runs `go build -o dualsub ./cmd/dualsub` at root.
 /dualsub
 /dualsub.exe
+# Pre-deploy backup binaries (see daemon-systemd-deploy notes); kept on disk,
+# never committed.
+/dualsub.pre-*
 # Or built inside the daemon tree.
 /daemon/dualsub
 /daemon/dualsub.exe

@@ -214,6 +214,7 @@ really fetch from and upload to the central node:
 | client  | `shared_upload_failed`  | outbox upload failed (logged once per outage)                  |
 | client  | `shared_history_queued` | pre-existing local translations queued for the first upload    |
 | local   | `lookup`                | page-load prefetch: `hits`/`lines` found locally, `remote_hits`, `remote_status` |
+| local   | `lookup_store_failed`   | remote hits could not be written to the local cache (`error`, `entries`) |
 | central | `shared_lookup`         | a client asked which lines exist; `cache_hits` of `lines`     |
 
 ```bash
