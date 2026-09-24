@@ -60,7 +60,7 @@ type Error struct {
 
 func (e *Error) Error() string {
 	if e.Cause != nil {
-		return fmt.Sprintf("%s/%s: %s (cause: %v)", e.Provider, e.Code, e.Message, e.Cause)
+		return sanitizeMessage(fmt.Sprintf("%s/%s: %s (cause: %v)", e.Provider, e.Code, e.Message, e.Cause))
 	}
 	return fmt.Sprintf("%s/%s: %s", e.Provider, e.Code, e.Message)
 }
