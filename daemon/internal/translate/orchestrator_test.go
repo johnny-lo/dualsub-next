@@ -3,6 +3,7 @@ package translate
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -512,6 +513,104 @@ func TestPartialSuccess(t *testing.T) {
 				t.Errorf("total_chunks = %d, want 2", p.TotalChunks)
 			}
 		}
+	}
+}
+
+// jobFromEvents reads back the persisted job for the run that produced events.
+func jobFromEvents(t *testing.T, c *cache.Cache, events []Event) *cache.Job {
+	t.Helper()
+	for _, e := range events {
+		if e.Type == EventJobCreated {
+			id := e.Payload.(JobCreatedPayload).JobID
+			job, err := c.GetJob(context.Background(), id)
+			if err != nil {
+				t.Fatalf("get job: %v", err)
+			}
+			return job
+		}
+	}
+	t.Fatal("no job-created event")
+	return nil
+}
+
+func TestPartialJobSummaryNamesFailure(t *testing.T) {
+	lines := mkLines(60)
+	m := &mockProvider{name: "mock", queue: []mockResponse{
+		{err: &provider.Error{Code: provider.CodeBadRequest, Message: "bad payload", Retryable: false, Provider: "mock"}},
+		{lines: translatedFor(lines[30:])},
+	}}
+	o, c := newOrch(t, m)
+	o.cfg.Concurrency = 1
+
+	events := collect(t, func(out chan<- Event) error {
+		return o.Translate(context.Background(), Input{
+			VideoKey: "v1", Provider: "mock",
+			SourceLang: "en", TargetLang: "zh-TW", Lines: lines,
+		}, out)
+	})
+
+	job := jobFromEvents(t, c, events)
+	if job.Status != "partial" {
+		t.Errorf("status = %q, want partial", job.Status)
+	}
+	if !strings.Contains(job.ErrorSummary, "1 of 2 chunks failed") {
+		t.Errorf("summary %q lacks failure count", job.ErrorSummary)
+	}
+	if !strings.Contains(job.ErrorSummary, "bad payload") {
+		t.Errorf("summary %q lacks first error message", job.ErrorSummary)
+	}
+}
+
+func TestAllFailedJobSummaryNamesFailure(t *testing.T) {
+	lines := mkLines(60)
+	m := &mockProvider{name: "mock", queue: []mockResponse{
+		{err: &provider.Error{Code: provider.CodeBadRequest, Message: "boom", Retryable: false, Provider: "mock"}},
+		{err: &provider.Error{Code: provider.CodeBadRequest, Message: "boom", Retryable: false, Provider: "mock"}},
+	}}
+	o, c := newOrch(t, m)
+	o.cfg.Concurrency = 1
+
+	events := collect(t, func(out chan<- Event) error {
+		return o.Translate(context.Background(), Input{
+			VideoKey: "v1", Provider: "mock",
+			SourceLang: "en", TargetLang: "zh-TW", Lines: lines,
+		}, out)
+	})
+
+	job := jobFromEvents(t, c, events)
+	if job.Status != "failed" {
+		t.Errorf("status = %q, want failed", job.Status)
+	}
+	if !strings.Contains(job.ErrorSummary, "2 of 2 chunks failed") {
+		t.Errorf("summary %q lacks failure count", job.ErrorSummary)
+	}
+	if !strings.Contains(job.ErrorSummary, "boom") {
+		t.Errorf("summary %q lacks first error message", job.ErrorSummary)
+	}
+	if strings.Count(job.ErrorSummary, "boom") != 1 {
+		t.Errorf("summary %q should carry only the first error", job.ErrorSummary)
+	}
+}
+
+func TestSuccessfulJobSummaryEmpty(t *testing.T) {
+	lines := mkLines(60)
+	m := &mockProvider{name: "mock", queue: []mockResponse{
+		{lines: translatedFor(lines[:30])},
+		{lines: translatedFor(lines[30:])},
+	}}
+	o, c := newOrch(t, m)
+	o.cfg.Concurrency = 1
+
+	events := collect(t, func(out chan<- Event) error {
+		return o.Translate(context.Background(), Input{
+			VideoKey: "v1", Provider: "mock",
+			SourceLang: "en", TargetLang: "zh-TW", Lines: lines,
+		}, out)
+	})
+
+	job := jobFromEvents(t, c, events)
+	if job.Status != "completed" || job.ErrorSummary != "" {
+		t.Errorf("status=%q summary=%q, want completed and empty", job.Status, job.ErrorSummary)
 	}
 }
 

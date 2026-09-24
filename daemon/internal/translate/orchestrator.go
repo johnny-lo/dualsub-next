@@ -143,6 +143,7 @@ func (o *Orchestrator) Translate(ctx context.Context, in Input, out chan<- Event
 		mu        sync.Mutex
 		completed int
 		failed    int
+		firstErr  string
 	)
 
 	sem := make(chan struct{}, o.cfg.Concurrency)
@@ -158,12 +159,15 @@ func (o *Orchestrator) Translate(ctx context.Context, in Input, out chan<- Event
 			}
 			defer func() { <-sem }()
 
-			ok := o.runChunk(ctx, prov, in, model, i+1, ch, out)
+			ok, errMsg := o.runChunk(ctx, prov, in, model, i+1, ch, out)
 			mu.Lock()
 			if ok {
 				completed++
 			} else {
 				failed++
+				if firstErr == "" {
+					firstErr = errMsg
+				}
 			}
 			mu.Unlock()
 		}()
@@ -176,6 +180,8 @@ func (o *Orchestrator) Translate(ctx context.Context, in Input, out chan<- Event
 	if err := ctx.Err(); err != nil {
 		failed = totalChunks - completed
 		summary = err.Error()
+	} else if failed > 0 {
+		summary = fmt.Sprintf("%d of %d chunks failed; first error: %s", failed, totalChunks, firstErr)
 	}
 	if failed > 0 && completed > 0 {
 		status = "partial"
@@ -252,10 +258,10 @@ func (o *Orchestrator) runChunk(
 	chunkNum int,
 	chunk []provider.Line,
 	out chan<- Event,
-) (success bool) {
+) (success bool, lastErr string) {
 	for attempt := 1; attempt <= o.cfg.MaxAttempts; attempt++ {
 		if ctx.Err() != nil {
-			return false
+			return false, ctx.Err().Error()
 		}
 		req := provider.Request{
 			Lines: chunk, SourceLang: in.SourceLang, TargetLang: in.TargetLang, Model: model,
@@ -272,7 +278,7 @@ func (o *Orchestrator) runChunk(
 			out <- Event{Type: EventChunkDone, Payload: ChunkDonePayload{
 				Chunk: chunkNum, Source: "llm", Lines: res.Lines,
 			}}
-			return true
+			return true, ""
 		}
 
 		var pe *provider.Error
@@ -289,12 +295,13 @@ func (o *Orchestrator) runChunk(
 			Retryable: retryable, Attempt: attempt, Final: final,
 		}}
 
+		lastErr = msg
 		if final {
-			return false
+			return false, lastErr
 		}
 		o.sleep(o.backoff(attempt))
 	}
-	return false
+	return false, lastErr
 }
 
 func (o *Orchestrator) backoff(attempt int) time.Duration {
