@@ -2,22 +2,50 @@ package provider
 
 import (
 	"context"
+	"fmt"
+	"io"
 	"os"
-	"path/filepath"
 	"testing"
 )
 
-// writeFakeCodex writes an executable shell script to a temp dir and returns
-// its path. The script body must behave like `codex exec`: it receives the
-// prompt on stdin and the output path via `-o <path>`.
-func writeFakeCodex(t *testing.T, body string) string {
-	t.Helper()
-	dir := t.TempDir()
-	path := filepath.Join(dir, "codex")
-	if err := os.WriteFile(path, []byte("#!/bin/sh\n"+body), 0o755); err != nil {
-		t.Fatalf("write fake codex: %v", err)
+// fakeCodexEnv selects the fake behaviour when the test binary re-executes
+// itself as `codex exec` (see TestMain).
+const fakeCodexEnv = "DUALSUB_FAKE_CODEX"
+
+// TestMain lets the test binary double as a portable fake codex CLI: when
+// fakeCodexEnv is set it behaves like `codex exec` (prompt on stdin, output
+// path via `-o <path>`) instead of running tests.
+func TestMain(m *testing.M) {
+	switch os.Getenv(fakeCodexEnv) {
+	case "":
+		os.Exit(m.Run())
+	case "ok":
+		out := ""
+		args := os.Args[1:]
+		for i := 0; i+1 < len(args); i++ {
+			if args[i] == "-o" {
+				out = args[i+1]
+			}
+		}
+		_, _ = io.Copy(io.Discard, os.Stdin)
+		if err := os.WriteFile(out, []byte("[1] 你好\n[2] 世界\n"), 0o644); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(2)
+		}
+		os.Exit(0)
+	case "ratelimit":
+		fmt.Fprintln(os.Stderr, "stream error: rate limit reached for gpt-5")
+		os.Exit(1)
 	}
-	return path
+	os.Exit(3)
+}
+
+// fakeCodex returns the path of a fake codex (this test binary) that behaves
+// according to mode.
+func fakeCodex(t *testing.T, mode string) string {
+	t.Helper()
+	t.Setenv(fakeCodexEnv, mode)
+	return os.Args[0]
 }
 
 var codexSample = Request{
@@ -30,18 +58,7 @@ var codexSample = Request{
 }
 
 func TestCodexTranslateHappyPath(t *testing.T) {
-	// Drain stdin, find -o <path>, write a canned [N] response there.
-	bin := writeFakeCodex(t, `
-out=""
-while [ $# -gt 0 ]; do
-  case "$1" in
-    -o) out="$2"; shift 2 ;;
-    *) shift ;;
-  esac
-done
-cat > /dev/null
-printf '[1] 你好\n[2] 世界\n' > "$out"
-`)
+	bin := fakeCodex(t, "ok")
 	p := NewCodex(CodexOptions{Bin: bin})
 	res, err := p.Translate(context.Background(), codexSample)
 	if err != nil {
@@ -53,10 +70,7 @@ printf '[1] 你好\n[2] 世界\n' > "$out"
 }
 
 func TestCodexTranslateRateLimit(t *testing.T) {
-	bin := writeFakeCodex(t, `
-echo "stream error: rate limit reached for gpt-5" >&2
-exit 1
-`)
+	bin := fakeCodex(t, "ratelimit")
 	p := NewCodex(CodexOptions{Bin: bin})
 	_, err := p.Translate(context.Background(), codexSample)
 	pe, ok := err.(*Error)
