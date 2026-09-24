@@ -15,7 +15,7 @@ export function parseVtt(vttText: string): TranscriptEntry[] {
   let index = 1
 
   for (const block of blocks) {
-    const lines = block.trim().split('\n')
+    const lines = block.trim().split(/\r?\n/)
     const timingIdx = lines.findIndex((l) => l.includes('-->'))
     if (timingIdx === -1) continue
 
