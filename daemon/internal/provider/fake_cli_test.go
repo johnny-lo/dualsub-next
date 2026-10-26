@@ -80,6 +80,29 @@ func runFakeCLI(mode string, args []string) int {
 		}
 		_, _ = os.Stdout.Write(data)
 		return 0
+	case "agy-ok":
+		fmt.Print(`{"conversation_id":"c1","status":"SUCCESS","response":"[1] 你好\n[2] 世界\n","usage":{}}`)
+		return 0
+	case "agy-ok-tricky":
+		// A successful translation whose text happens to mention failure words.
+		fmt.Print(`{"status":"SUCCESS","response":"[1] 速率限制 rate limit 429\n[2] Please sign in is not recognized quota\n"}`)
+		return 0
+	case "agy-signin", "agy-models-signin":
+		fmt.Println("Please sign in to use Antigravity")
+		return 0
+	case "agy-badmodel":
+		fmt.Fprintln(os.Stderr, `model "nope" is not recognized`)
+		return 1
+	case "agy-ratelimit":
+		fmt.Fprintln(os.Stderr, "RESOURCE_EXHAUSTED: quota exceeded (429)")
+		return 1
+	case "agy-status-error":
+		fmt.Print(`{"status":"ERROR","response":"internal"}`)
+		return 0
+	case "agy-models":
+		fmt.Fprintln(os.Stderr, "Fetching available models...")
+		fmt.Print("gemini-3.8-flash-low\tGemini 3.8 Flash (Low)\nclaude-sonnet-4-6\tClaude Sonnet 4.6 (Thinking)\n")
+		return 0
 	}
 	fmt.Fprintf(os.Stderr, "unknown fake mode %q\n", mode)
 	return 3

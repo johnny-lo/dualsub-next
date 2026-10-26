@@ -44,8 +44,8 @@ func (p *codexProvider) Name() string { return "codex" }
 
 func (p *codexProvider) DefaultModel() string { return p.opts.Model }
 
-// codexRateLimitRE detects subscription rate-limit / quota messages on stderr.
-var codexRateLimitRE = regexp.MustCompile(`(?i)rate.?limit|quota|usage limit|too many requests|\b429\b`)
+// cliRateLimitRE detects subscription rate-limit / quota messages from a CLI.
+var cliRateLimitRE = regexp.MustCompile(`(?i)rate.?limit|quota|usage limit|too many requests|\b429\b`)
 
 func (p *codexProvider) Translate(ctx context.Context, in Request) (Response, error) {
 	model := in.Model
@@ -106,7 +106,7 @@ func (p *codexProvider) Translate(ctx context.Context, in Request) (Response, er
 			return Response{}, &Error{Code: CodeTimeout, Provider: "codex", Message: "codex exec did not complete: " + ctxErr.Error(), Retryable: true, Cause: ctxErr}
 		}
 		msg := truncate(stderr.String(), 500)
-		if codexRateLimitRE.MatchString(stderr.String()) {
+		if cliRateLimitRE.MatchString(stderr.String()) {
 			return Response{}, &Error{Code: CodeRateLimit, Provider: "codex", Message: msg, Retryable: true, Cause: runErr}
 		}
 		return Response{}, &Error{Code: CodeServerError, Provider: "codex", Message: "codex exec failed: " + msg, Retryable: true, Cause: runErr}
