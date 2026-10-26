@@ -374,7 +374,7 @@ func TestConfigGetPut(t *testing.T) {
 		"server":{"listen":"127.0.0.1:9000"},
 		"translate":{"chunk_size":15,"concurrency":2,"max_attempts":4},
 		"cache":{"path":"/tmp/x.db"},
-		"providers":{"gemini":{"api_key":"newkey","base_url":"","default_model":""}}
+		"providers":{"agy":{"bin":"/opt/agy","model":"gemini-3.8-flash-low"}}
 	}`)
 	req, _ := http.NewRequest(http.MethodPut, ctx.ts.URL+"/v1/config", putBody)
 	req.Header.Set("Content-Type", "application/json")
@@ -399,8 +399,8 @@ func TestConfigGetPut(t *testing.T) {
 	if loaded.Translate.ChunkSize != 15 {
 		t.Errorf("chunk_size lost: %d", loaded.Translate.ChunkSize)
 	}
-	if loaded.Providers.Gemini == nil || loaded.Providers.Gemini.APIKey != "newkey" {
-		t.Errorf("gemini key not persisted: %+v", loaded.Providers.Gemini)
+	if loaded.Providers.Agy == nil || loaded.Providers.Agy.Bin != "/opt/agy" {
+		t.Errorf("agy config not persisted: %+v", loaded.Providers.Agy)
 	}
 	if loaded.Sync.Token != "existing-sync-secret" {
 		t.Errorf("sync token was lost during JSON config update: %q", loaded.Sync.Token)

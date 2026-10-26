@@ -12,7 +12,7 @@ func TestRunConfigSyncPreservesExistingConfig(t *testing.T) {
 	original := &config.Config{
 		Server: config.ServerConfig{Listen: "127.0.0.1:7878"},
 		Providers: config.ProvidersConfig{
-			Gemini: &config.GeminiProvider{APIKey: "keep-me", DefaultModel: "flash"},
+			Agy: &config.AgyProvider{Bin: "keep-me", Model: "gemini-3.8-flash-low"},
 		},
 	}
 	if err := original.Save(path); err != nil {
@@ -36,8 +36,8 @@ func TestRunConfigSyncPreservesExistingConfig(t *testing.T) {
 	if got.Sync.TokenFile != "/secure/sync.token" {
 		t.Fatalf("token file = %q", got.Sync.TokenFile)
 	}
-	if got.Providers.Gemini == nil || got.Providers.Gemini.APIKey != "keep-me" {
-		t.Fatalf("provider config was lost: %+v", got.Providers.Gemini)
+	if got.Providers.Agy == nil || got.Providers.Agy.Bin != "keep-me" {
+		t.Fatalf("provider config was lost: %+v", got.Providers.Agy)
 	}
 }
 

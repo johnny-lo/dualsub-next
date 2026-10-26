@@ -13,8 +13,8 @@ import (
 	"time"
 )
 
-// apiKeyParamRE matches credentials carried in URL query strings (Gemini puts
-// the API key in `?key=...`). We scrub them out of any error message that
+// apiKeyParamRE matches credentials carried in URL query strings (some APIs
+// take the key as `?key=...`). We scrub them out of any error message that
 // might surface to the extension or logs.
 var apiKeyParamRE = regexp.MustCompile(`(?i)([?&](?:api_?key|key|access_token)=)[^&\s'"]+`)
 

@@ -49,18 +49,12 @@ type SyncConfig struct {
 
 type ProvidersConfig struct {
 	OpenAI *OpenAIProvider `toml:"openai" json:"openai,omitempty"`
-	Gemini *GeminiProvider `toml:"gemini" json:"gemini,omitempty"`
 	Ollama *OllamaProvider `toml:"ollama" json:"ollama,omitempty"`
 	Codex  *CodexProvider  `toml:"codex"  json:"codex,omitempty"`
+	Agy    *AgyProvider    `toml:"agy"    json:"agy,omitempty"`
 }
 
 type OpenAIProvider struct {
-	APIKey       string `toml:"api_key"       json:"api_key"`
-	BaseURL      string `toml:"base_url"      json:"base_url"`
-	DefaultModel string `toml:"default_model" json:"default_model"`
-}
-
-type GeminiProvider struct {
 	APIKey       string `toml:"api_key"       json:"api_key"`
 	BaseURL      string `toml:"base_url"      json:"base_url"`
 	DefaultModel string `toml:"default_model" json:"default_model"`
@@ -76,6 +70,13 @@ type CodexProvider struct {
 	Profile string `toml:"profile" json:"profile"`
 	Model   string `toml:"model"   json:"model"`
 	Sandbox string `toml:"sandbox" json:"sandbox"`
+}
+
+// AgyProvider configures the Google Antigravity CLI (`agy`); auth is the
+// user's own agy sign-in, so there is no key.
+type AgyProvider struct {
+	Bin   string `toml:"bin"   json:"bin"`
+	Model string `toml:"model" json:"model"`
 }
 
 // DefaultPath returns ~/.config/dualsub/config.toml.
@@ -118,12 +119,6 @@ func (c *Config) ApplyEnvOverrides() {
 			c.Providers.OpenAI = &OpenAIProvider{}
 		}
 		c.Providers.OpenAI.APIKey = v
-	}
-	if v := os.Getenv("GEMINI_API_KEY"); v != "" {
-		if c.Providers.Gemini == nil {
-			c.Providers.Gemini = &GeminiProvider{}
-		}
-		c.Providers.Gemini.APIKey = v
 	}
 	if v := os.Getenv("OLLAMA_BASE_URL"); v != "" {
 		if c.Providers.Ollama == nil {
@@ -229,14 +224,14 @@ func (c *Config) EnabledProviders() []string {
 	if c.Providers.OpenAI != nil && c.Providers.OpenAI.APIKey != "" {
 		out = append(out, "openai")
 	}
-	if c.Providers.Gemini != nil && c.Providers.Gemini.APIKey != "" {
-		out = append(out, "gemini")
-	}
 	if c.Providers.Ollama != nil {
 		out = append(out, "ollama") // no key required
 	}
 	if c.Providers.Codex != nil {
 		out = append(out, "codex") // no key required; auth via `codex login`
+	}
+	if c.Providers.Agy != nil {
+		out = append(out, "agy") // no key required; auth via agy's own sign-in
 	}
 	return out
 }

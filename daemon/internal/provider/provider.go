@@ -1,5 +1,5 @@
 // Package provider defines the LLM translation provider interface and
-// implementations for OpenAI, Google Gemini, Ollama, and a Claude stub.
+// implementations for OpenAI, Ollama, the codex and agy CLIs, and a Claude stub.
 package provider
 
 import (
