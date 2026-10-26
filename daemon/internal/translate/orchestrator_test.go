@@ -28,6 +28,7 @@ type mockProvider struct {
 	calls        atomic.Int32
 	modelsMu     sync.Mutex
 	models       []string
+	efforts      []string
 	block        chan struct{}
 }
 
@@ -38,6 +39,7 @@ func (m *mockProvider) DefaultModel() string { return m.defaultModel }
 func (m *mockProvider) Translate(_ context.Context, in provider.Request) (provider.Response, error) {
 	m.modelsMu.Lock()
 	m.models = append(m.models, in.Model)
+	m.efforts = append(m.efforts, in.Effort)
 	m.modelsMu.Unlock()
 	if m.block != nil {
 		<-m.block
@@ -701,5 +703,33 @@ func TestLocalFallbackIsQueuedForSync(t *testing.T) {
 	}
 	if len(pending) != len(lines) {
 		t.Fatalf("pending sync entries = %d, want %d", len(pending), len(lines))
+	}
+}
+
+func TestTranslatePassesEffortToProvider(t *testing.T) {
+	ctx := context.Background()
+	lines := mkLines(35) // two chunks of the 30-line chunk size
+	m := &mockProvider{name: "mock", queue: []mockResponse{
+		{lines: translatedFor(lines[:30])},
+		{lines: translatedFor(lines[30:])},
+	}}
+	o, _ := newOrch(t, m)
+
+	collect(t, func(out chan<- Event) error {
+		return o.Translate(ctx, Input{
+			VideoKey: "v1", Provider: "mock", Model: "gpt-5.6-sol", Effort: "low",
+			SourceLang: "en", TargetLang: "zh-TW", Lines: lines,
+		}, out)
+	})
+
+	m.modelsMu.Lock()
+	defer m.modelsMu.Unlock()
+	if len(m.efforts) != 2 {
+		t.Fatalf("provider calls = %d, want 2", len(m.efforts))
+	}
+	for i, e := range m.efforts {
+		if e != "low" {
+			t.Errorf("call %d saw effort %q, want low", i, e)
+		}
 	}
 }
