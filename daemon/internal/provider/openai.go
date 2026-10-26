@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sort"
+	"strings"
 	"time"
 )
 
@@ -93,4 +95,42 @@ func (p *openaiProvider) Translate(ctx context.Context, in Request) (Response, e
 		return Response{}, err
 	}
 	return Response{Lines: lines, Raw: content}, nil
+}
+
+// openaiNonTextMarkers flag model ids that cannot do chat translation.
+var openaiNonTextMarkers = []string{
+	"embedding", "tts", "whisper", "dall-e", "image", "audio", "realtime", "moderation", "transcribe",
+}
+
+func parseOpenAIModels(raw []byte) ([]ModelInfo, error) {
+	var parsed struct {
+		Data []struct {
+			ID string `json:"id"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(raw, &parsed); err != nil {
+		return nil, &Error{Code: CodeParseFailed, Provider: "openai", Message: fmt.Sprintf("decode models: %v", err), Cause: err}
+	}
+	out := make([]ModelInfo, 0, len(parsed.Data))
+next:
+	for _, m := range parsed.Data {
+		for _, marker := range openaiNonTextMarkers {
+			if strings.Contains(m.ID, marker) {
+				continue next
+			}
+		}
+		out = append(out, ModelInfo{ID: m.ID, Label: m.ID})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
+	return out, nil
+}
+
+func (p *openaiProvider) ListModels(ctx context.Context) ([]ModelInfo, error) {
+	raw, err := p.http.getJSON(ctx, p.opts.BaseURL+"/models", map[string]string{
+		"Authorization": "Bearer " + p.opts.APIKey,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return parseOpenAIModels(raw)
 }

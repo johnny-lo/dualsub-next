@@ -47,6 +47,19 @@ func (h *httpClient) postJSON(ctx context.Context, urlStr string, headers map[st
 		return nil, &Error{Code: CodeBadRequest, Provider: h.name, Message: err.Error()}
 	}
 	req.Header.Set("Content-Type", "application/json")
+	return h.do(req, headers)
+}
+
+func (h *httpClient) getJSON(ctx context.Context, urlStr string, headers map[string]string) ([]byte, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, urlStr, nil)
+	if err != nil {
+		return nil, &Error{Code: CodeBadRequest, Provider: h.name, Message: err.Error()}
+	}
+	return h.do(req, headers)
+}
+
+// do sends req and maps transport failures and non-2xx statuses to *Error.
+func (h *httpClient) do(req *http.Request, headers map[string]string) ([]byte, error) {
 	for k, v := range headers {
 		req.Header.Set(k, v)
 	}
