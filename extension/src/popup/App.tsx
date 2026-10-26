@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type CSSProperties } from 'react'
+import { useEffect, useMemo, useRef, useState, type CSSProperties } from 'react'
 import {
   Alert,
   Button,
@@ -44,8 +44,22 @@ import {
   DaemonClient,
   type ChunkErrorPayload,
   type JobSummary,
+  type ModelInfo,
   type ProviderInfo,
 } from '@/shared/DaemonClient'
+import {
+  CLI_DEFAULT,
+  choiceFor,
+  defaultChoiceFor,
+  loadSelection,
+  reconcileChoice,
+  reconcileProvider,
+  requestTarget,
+  saveSelection,
+  withChoice,
+  withProvider,
+  type Selection,
+} from '@/shared/selection'
 import { PREFERRED_SOURCE, TARGET_LANG } from '@/shared/langs'
 import { buildStartCommand, isWindowsPlatform } from './startCommand'
 
@@ -72,7 +86,21 @@ type TranslateJob = {
   fatal?: string
   videoKey?: string
   provider?: string
+  model?: string
+  effort?: string
   source?: TranscriptPayload
+}
+
+type ModelListState =
+  | { state: 'loading' }
+  | { state: 'ok'; models: ModelInfo[] }
+  | { state: 'error'; message: string }
+
+// Providers that run a local CLI: "default" means the CLI's own setting.
+const CLI_PROVIDERS = new Set(['codex', 'agy'])
+
+function modelLabel(m: ModelInfo): string {
+  return m.label && m.label !== m.id ? `${m.label} (${m.id})` : m.id
 }
 
 const client = new DaemonClient()
@@ -127,6 +155,8 @@ function jobFromTranslateStatus(status: TranslateStatus): TranslateJob | null {
     fatal: status.status === 'failed' ? status.errorSummary : undefined,
     videoKey: status.videoKey,
     provider: status.provider,
+    model: status.model,
+    effort: status.effort,
   }
 }
 
@@ -134,7 +164,12 @@ export default function App() {
   const [daemon, setDaemon] = useState<DaemonStatus>({ state: 'checking' })
   const [providers, setProviders] = useState<ProviderInfo[]>([])
   const [providerLoadError, setProviderLoadError] = useState<string | null>(null)
-  const [chosen, setChosen] = useState<string>('')
+  // The remembered provider/model/effort; the content script reads the same
+  // stored value, so live mode and auto-translate follow every change here.
+  const [selection, setSelection] = useState<Selection | null>(null)
+  const selectionRef = useRef<Selection | null>(null)
+  const [modelLists, setModelLists] = useState<Record<string, ModelListState>>({})
+  const chosen = selection?.provider ?? ''
   const [liveMode, setLiveMode] = useState(false)
 
   const [overlayStatus, setOverlayStatus] = useState<OverlayStatus | null>(null)
@@ -198,7 +233,8 @@ export default function App() {
         const list = await client.listProviders()
         setProviders(list)
         setProviderLoadError(null)
-        if (list.length > 0 && !chosen) setChosen(list[0].name)
+        const sel = reconcileProvider(await loadSelection(), list.map((p) => p.name))
+        if (sel) updateSelection(sel)
       } catch (err) {
         setProviderLoadError((err as Error).message)
       }
@@ -207,6 +243,36 @@ export default function App() {
       setDaemon({ state: 'offline', error: (err as Error).message })
     }
   }
+
+  const updateSelection = (next: Selection) => {
+    selectionRef.current = next
+    setSelection(next)
+    void saveSelection(next).catch(() => {})
+  }
+
+  const loadModels = async (provider: string, refresh = false) => {
+    setModelLists((m) => ({ ...m, [provider]: { state: 'loading' } }))
+    try {
+      const { models } = await client.listModels(provider, { refresh })
+      setModelLists((m) => ({ ...m, [provider]: { state: 'ok', models } }))
+      // Only a successful list may drop a remembered model that is gone.
+      const cur = selectionRef.current
+      if (cur) {
+        const current = choiceFor(cur, provider)
+        const fitted = reconcileChoice(current, models)
+        if (fitted.model !== current.model || fitted.effort !== current.effort) {
+          updateSelection(withChoice(cur, provider, fitted))
+        }
+      }
+    } catch (err) {
+      setModelLists((m) => ({ ...m, [provider]: { state: 'error', message: (err as Error).message } }))
+    }
+  }
+
+  useEffect(() => {
+    if (chosen && daemon.state === 'connected') void loadModels(chosen)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [chosen, daemon.state])
 
   useEffect(() => {
     chrome.storage.local.get('daemonInstallDir').then((r) => {
@@ -300,6 +366,7 @@ export default function App() {
 
   const onTranslate = async () => {
     if (!chosen) return
+    const target = requestTarget(selection, chosen)
     setJob({
       status: 'extracting',
       totalChunks: 0,
@@ -309,7 +376,9 @@ export default function App() {
       totalLines: 0,
       translatedLineCount: 0,
       errors: [],
-      provider: chosen,
+      provider: target.provider,
+      model: target.model,
+      effort: target.effort,
     })
 
     let payload: TranscriptPayload
@@ -361,7 +430,7 @@ export default function App() {
           site: payload.site,
           video_key: payload.videoKey,
           title: payload.title,
-          provider: chosen,
+          ...target,
           source_lang: PREFERRED_SOURCE,
           target_lang: TARGET_LANG,
           lines: payload.entries.map((e) => ({ index: e.index, text: e.originalText })),
@@ -447,6 +516,37 @@ export default function App() {
     }
     return 0
   }, [job])
+
+  const choice = choiceFor(selection, chosen)
+  const modelList = modelLists[chosen]
+  const listedModels = modelList?.state === 'ok' ? modelList.models : []
+  const chosenModelInfo = listedModels.find((m) => m.id === choice.model)
+  const defaultModel = providers.find((p) => p.name === chosen)?.default_model
+  const modelOptions = [
+    {
+      value: '',
+      label: (CLI_PROVIDERS.has(chosen) ? 'CLI default' : 'Config default') + (defaultModel ? ` · ${defaultModel}` : ''),
+    },
+    ...listedModels.map((m) => ({ value: m.id, label: modelLabel(m) })),
+  ]
+  // Keep a remembered model visible while its list is loading or failed.
+  if (choice.model && !chosenModelInfo) modelOptions.push({ value: choice.model, label: choice.model })
+  const effortOptions = !choice.model
+    ? []
+    : chosenModelInfo
+      ? (chosenModelInfo.efforts ?? [])
+      : choice.effort
+        ? [choice.effort]
+        : []
+
+  const onProviderChange = (name: string) => updateSelection(withProvider(selection, name))
+  const onModelChange = (id: string) => {
+    const info = listedModels.find((m) => m.id === id)
+    const next = !id ? CLI_DEFAULT : info ? defaultChoiceFor(info) : { model: id, effort: choice.effort }
+    updateSelection(withChoice(selection, chosen, next))
+  }
+  const onEffortChange = (effort: string) =>
+    updateSelection(withChoice(selection, chosen, { model: choice.model, effort }))
 
   const currentPageLabel = compactVideoKey(overlayStatus?.videoKey ?? job?.videoKey)
   const activeJob = job?.status === 'running' || job?.status === 'extracting'
@@ -546,28 +646,64 @@ export default function App() {
           <div style={panelStyle}>
             <div style={sectionTitleStyle}>
               <Typography.Text strong>Translate Transcript</Typography.Text>
-              {job?.provider && <Typography.Text type="secondary" style={{ fontSize: 12 }}>{job.provider}</Typography.Text>}
+              {job?.provider && (
+                <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                  {[job.provider, job.model, job.effort].filter(Boolean).join(' · ')}
+                </Typography.Text>
+              )}
             </div>
             <Space.Compact style={{ width: '100%' }}>
               <Select
-                value={chosen}
-                onChange={setChosen}
+                value={chosen || undefined}
+                onChange={onProviderChange}
                 disabled={providers.length === 0 || activeJob}
-                style={{ width: 122 }}
+                style={{ width: 92 }}
                 placeholder="Provider"
                 options={providers.map((p) => ({ value: p.name, label: p.name }))}
               />
-              <Button
-                type="primary"
-                icon={<TranslationOutlined />}
-                onClick={onTranslate}
-                disabled={daemon.state !== 'connected' || providers.length === 0 || activeJob}
-                block
-              >
-                Translate
-              </Button>
+              <Select
+                value={choice.model}
+                onChange={onModelChange}
+                disabled={!chosen || activeJob}
+                loading={modelList?.state === 'loading'}
+                style={{ flex: 1, minWidth: 0 }}
+                popupMatchSelectWidth={false}
+                options={modelOptions}
+              />
+              {effortOptions.length > 0 && (
+                <Select
+                  value={choice.effort || undefined}
+                  onChange={onEffortChange}
+                  disabled={activeJob}
+                  style={{ width: 84 }}
+                  placeholder="Effort"
+                  options={effortOptions.map((e) => ({ value: e, label: e }))}
+                />
+              )}
+              <Tooltip title="Re-check which models are available">
+                <Button
+                  icon={<ReloadOutlined />}
+                  onClick={() => void loadModels(chosen, true)}
+                  disabled={!chosen || daemon.state !== 'connected' || modelList?.state === 'loading'}
+                />
+              </Tooltip>
             </Space.Compact>
+            <Button
+              type="primary"
+              icon={<TranslationOutlined />}
+              onClick={onTranslate}
+              disabled={daemon.state !== 'connected' || providers.length === 0 || activeJob}
+              block
+              style={{ marginTop: 8 }}
+            >
+              Translate
+            </Button>
 
+            {modelList?.state === 'error' && (
+              <Typography.Text type="danger" style={{ display: 'block', fontSize: 12, marginTop: 6 }}>
+                models: {modelList.message}
+              </Typography.Text>
+            )}
             {providerLoadError && (
               <Typography.Text type="danger" style={{ display: 'block', fontSize: 12, marginTop: 6 }}>
                 providers: {providerLoadError}
