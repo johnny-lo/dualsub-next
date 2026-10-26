@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"regexp"
 )
 
 type Provider interface {
@@ -19,7 +20,31 @@ type Request struct {
 	SourceLang string
 	TargetLang string
 	Model      string // empty → provider default
+	Effort     string // empty → provider/CLI default; only codex uses it
 }
+
+// ModelInfo is one model a provider's account can use right now.
+type ModelInfo struct {
+	ID            string   `json:"id"`
+	Label         string   `json:"label"`
+	Efforts       []string `json:"efforts,omitempty"`
+	DefaultEffort string   `json:"default_effort,omitempty"`
+}
+
+// ModelLister is implemented by providers that can ask their API or CLI which
+// models are available, so nothing has to hardcode a model list.
+type ModelLister interface {
+	ListModels(ctx context.Context) ([]ModelInfo, error)
+}
+
+// ErrListUnsupported is returned by wrappers whose provider cannot list models.
+var ErrListUnsupported = errors.New("provider cannot list models")
+
+// cliValueRE bounds model and effort values handed to a CLI on its argv. They
+// arrive over HTTP, and on Windows an npm `.cmd` shim runs through cmd.exe.
+var cliValueRE = regexp.MustCompile(`^[A-Za-z0-9._:/-]+$`)
+
+func validCLIValue(s string) bool { return cliValueRE.MatchString(s) }
 
 type Line struct {
 	Index int    `json:"index"`
