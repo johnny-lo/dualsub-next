@@ -72,9 +72,9 @@ export default function App() {
     try {
       const values = await form.validateFields()
       // Merge with existing config so we preserve fields the form does not surface.
-      // `providers` needs a nested merge: the form only surfaces gemini/openai/
-      // ollama, so a shallow spread would drop unsurfaced providers like
-      // [providers.codex] (configured via TOML, no settings UI).
+      // `providers` needs a nested merge: the form only surfaces openai/ollama,
+      // so a shallow spread would drop unsurfaced providers like
+      // [providers.codex] and [providers.agy] (configured via TOML, no settings UI).
       const merged = {
         ...(config ?? {}),
         ...values,
@@ -168,20 +168,6 @@ export default function App() {
           <Divider orientation="left" style={{ margin: '16px 0 10px' }}>
             Providers
           </Divider>
-
-          <Card size="small" title="Gemini" style={{ marginBottom: 12 }}>
-            <Form.Item label="API key" name={['providers', 'gemini', 'api_key']}>
-              <Input.Password placeholder="AIza..." autoComplete="off" />
-            </Form.Item>
-            <Space size="middle" wrap>
-              <Form.Item label="Default model" name={['providers', 'gemini', 'default_model']}>
-                <Input placeholder="gemini-2.5-flash" />
-              </Form.Item>
-              <Form.Item label="Base URL (optional)" name={['providers', 'gemini', 'base_url']}>
-                <Input placeholder="(default)" />
-              </Form.Item>
-            </Space>
-          </Card>
 
           <Card size="small" title="OpenAI" style={{ marginBottom: 12 }}>
             <Form.Item label="API key" name={['providers', 'openai', 'api_key']}>

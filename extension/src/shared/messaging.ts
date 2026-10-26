@@ -115,6 +115,8 @@ export type TranslateStatus =
       jobId: string | null
       videoKey: string
       provider: string
+      model?: string
+      effort?: string
       status: 'running' | 'completed' | 'partial' | 'failed' | 'aborted'
       totalChunks: number
       completedChunks: number
