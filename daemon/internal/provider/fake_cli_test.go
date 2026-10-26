@@ -73,6 +73,10 @@ func runFakeCLI(mode string, args []string) int {
 			fmt.Fprintf(os.Stderr, "unexpected args: %q\n", args)
 			return 2
 		}
+		if os.Getenv(fakeFixtureEnv) == "" {
+			fmt.Print(`{"models":[{"slug":"x","display_name":"X","visibility":"hide","priority":1}]}`)
+			return 0
+		}
 		data, err := os.ReadFile(os.Getenv(fakeFixtureEnv))
 		if err != nil {
 			fmt.Fprintln(os.Stderr, err)
@@ -97,7 +101,18 @@ func runFakeCLI(mode string, args []string) int {
 		fmt.Fprintln(os.Stderr, "RESOURCE_EXHAUSTED: quota exceeded (429)")
 		return 1
 	case "agy-status-error":
-		fmt.Print(`{"status":"ERROR","response":"internal"}`)
+		// agy's real ERROR result: the reason is in "error", not "response".
+		fmt.Print(`{"conversation_id":"c1","status":"ERROR","error":"backend unavailable: try again","usage":{}}`)
+		return 0
+	case "agy-invalid-model":
+		fmt.Print(`{"conversation_id":"","status":"ERROR","error":"invalid model selection: nope","usage":{}}`)
+		return 1
+	case "agy-resource-exhausted":
+		fmt.Print(`{"conversation_id":"c","status":"ERROR","error":"RESOURCE_EXHAUSTED: try again later","usage":{}}`)
+		return 0
+	case "agy-models-empty":
+		// A failure agy reports on stdout while still exiting 0.
+		fmt.Println("Something went wrong")
 		return 0
 	case "agy-models":
 		fmt.Fprintln(os.Stderr, "Fetching available models...")

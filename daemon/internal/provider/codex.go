@@ -182,5 +182,11 @@ func (p *codexProvider) ListModels(ctx context.Context) ([]ModelInfo, error) {
 		}
 		return nil, &Error{Code: CodeServerError, Provider: "codex", Message: "codex debug models failed: " + truncate(stderr.String(), 500), Cause: runErr}
 	}
-	return parseCodexModels(stdout.Bytes())
+	models, err := parseCodexModels(stdout.Bytes())
+	if err == nil && len(models) == 0 {
+		// An empty picker is never a real answer; treating it as one would
+		// reset the user's remembered model to the CLI default.
+		err = &Error{Code: CodeServerError, Provider: "codex", Message: "codex debug models listed no visible models"}
+	}
+	return models, err
 }

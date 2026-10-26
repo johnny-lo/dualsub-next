@@ -43,10 +43,22 @@ func (p *agyProvider) Name() string { return "agy" }
 
 func (p *agyProvider) DefaultModel() string { return p.opts.Model }
 
-// agyResult is agy's `--output-format json` print-mode result.
+// agyResult is agy's `--output-format json` print-mode result. A non-SUCCESS
+// result carries its reason in Error, not Response.
 type agyResult struct {
 	Status   string `json:"status"`
 	Response string `json:"response"`
+	Error    string `json:"error"`
+}
+
+// reason is the most useful failure text agy gave, for error messages.
+func (r agyResult) reason(stderr string) string {
+	for _, s := range []string{r.Error, r.Response, stderr} {
+		if s = strings.TrimSpace(s); s != "" {
+			return truncate(s, 500)
+		}
+	}
+	return "no output"
 }
 
 func (p *agyProvider) Translate(ctx context.Context, in Request) (Response, error) {
@@ -108,13 +120,13 @@ func (p *agyProvider) Translate(ctx context.Context, in Request) (Response, erro
 		}
 	}
 	if runErr != nil {
-		return Response{}, &Error{Code: CodeServerError, Provider: "agy", Message: "agy failed: " + truncate(stderr.String(), 500), Retryable: true, Cause: runErr}
+		return Response{}, &Error{Code: CodeServerError, Provider: "agy", Message: "agy failed: " + result.reason(stderr.String()), Retryable: true, Cause: runErr}
 	}
 	if jsonErr != nil {
 		return Response{}, &Error{Code: CodeParseFailed, Provider: "agy", Message: "decode agy output: " + truncate(stdout.String(), 200), Retryable: true, Cause: jsonErr}
 	}
 	if result.Status != "SUCCESS" {
-		return Response{}, &Error{Code: CodeServerError, Provider: "agy", Message: fmt.Sprintf("agy status %s: %s", result.Status, truncate(result.Response, 500)), Retryable: true}
+		return Response{}, &Error{Code: CodeServerError, Provider: "agy", Message: fmt.Sprintf("agy status %s: %s", result.Status, result.reason(stderr.String())), Retryable: true}
 	}
 	lines, err := ParseResponse(result.Response, in.Lines, "agy")
 	if err != nil {
@@ -130,9 +142,9 @@ func classifyAgyOutput(out string) *Error {
 	switch {
 	case strings.Contains(out, "Please sign in"):
 		return &Error{Code: CodeMissingConfig, Provider: "agy", Message: "agy is not signed in"}
-	case strings.Contains(out, "is not recognized"):
+	case strings.Contains(out, "is not recognized") || strings.Contains(out, "invalid model selection"):
 		return &Error{Code: CodeBadRequest, Provider: "agy", Message: truncate(strings.TrimSpace(out), 500)}
-	case cliRateLimitRE.MatchString(out):
+	case cliRateLimitRE.MatchString(out) || strings.Contains(out, "RESOURCE_EXHAUSTED"):
 		return &Error{Code: CodeRateLimit, Provider: "agy", Message: truncate(strings.TrimSpace(out), 500), Retryable: true}
 	}
 	return nil
@@ -198,5 +210,11 @@ func (p *agyProvider) ListModels(ctx context.Context) ([]ModelInfo, error) {
 		}
 		return nil, &Error{Code: CodeServerError, Provider: "agy", Message: "agy models failed: " + truncate(stderr.String(), 500), Cause: runErr}
 	}
-	return parseAgyModels(stdout.String()), nil
+	models := parseAgyModels(stdout.String())
+	// agy can fail with exit 0; an empty list is never a real answer, and
+	// treating it as one would reset the user's remembered model.
+	if len(models) == 0 {
+		return nil, &Error{Code: CodeServerError, Provider: "agy", Message: "agy models listed no models: " + truncate(strings.TrimSpace(stdout.String()+"\n"+stderr.String()), 500)}
+	}
+	return models, nil
 }

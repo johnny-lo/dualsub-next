@@ -133,6 +133,8 @@ func TestAgyTranslateErrors(t *testing.T) {
 		{"agy-badmodel", CodeBadRequest, false},
 		{"agy-ratelimit", CodeRateLimit, true},
 		{"agy-status-error", CodeServerError, true},
+		{"agy-invalid-model", CodeBadRequest, false},
+		{"agy-resource-exhausted", CodeRateLimit, true},
 	} {
 		t.Run(tc.mode, func(t *testing.T) {
 			_, err := NewAgy(AgyOptions{Bin: fakeCLI(t, tc.mode)}).Translate(context.Background(), agySample)
@@ -198,5 +200,20 @@ func TestAgyNameAndModel(t *testing.T) {
 	p := NewAgy(AgyOptions{Model: "gemini-3.8-flash-low"})
 	if p.Name() != "agy" || p.DefaultModel() != "gemini-3.8-flash-low" {
 		t.Errorf("got %q / %q", p.Name(), p.DefaultModel())
+	}
+}
+
+func TestAgyErrorResultKeepsReason(t *testing.T) {
+	_, err := NewAgy(AgyOptions{Bin: fakeCLI(t, "agy-status-error")}).Translate(context.Background(), agySample)
+	if pe := agyErr(t, err); !strings.Contains(pe.Message, "backend unavailable: try again") {
+		t.Errorf("message %q lost agy's error reason", pe.Message)
+	}
+}
+
+func TestAgyListModelsEmptyIsAnError(t *testing.T) {
+	_, err := NewAgy(AgyOptions{Bin: fakeCLI(t, "agy-models-empty")}).(ModelLister).ListModels(context.Background())
+	pe := agyErr(t, err)
+	if pe.Code != CodeServerError || !strings.Contains(pe.Message, "Something went wrong") {
+		t.Errorf("got %s %q, want SERVER_ERROR carrying agy's output", pe.Code, pe.Message)
 	}
 }

@@ -159,3 +159,14 @@ func TestCodexRejectsUnsafeEffortAndModel(t *testing.T) {
 		}
 	}
 }
+
+func TestCodexListModelsEmptyIsAnError(t *testing.T) {
+	// Every model hidden: an empty picker must not count as a successful list.
+	bin := fakeCLI(t, "codex-models")
+	t.Setenv(fakeFixtureEnv, "")
+	_, err := NewCodex(CodexOptions{Bin: bin}).(ModelLister).ListModels(context.Background())
+	pe, ok := err.(*Error)
+	if !ok || pe.Code != CodeServerError {
+		t.Fatalf("want SERVER_ERROR *Error, got %T: %v", err, err)
+	}
+}
