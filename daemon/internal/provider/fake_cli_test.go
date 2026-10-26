@@ -113,6 +113,8 @@ func runFakeCLI(mode string, args []string) int {
 func fakeCLI(t *testing.T, mode string) string {
 	t.Helper()
 	t.Setenv(fakeCLIEnv, mode)
+	// Under -race every child would otherwise sleep 1s before exiting.
+	t.Setenv("GORACE", "atexit_sleep_ms=0")
 	return os.Args[0]
 }
 
