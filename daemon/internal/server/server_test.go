@@ -21,8 +21,9 @@ import (
 )
 
 type mockProvider struct {
-	mu    sync.Mutex
-	calls int
+	mu      sync.Mutex
+	calls   int
+	efforts []string
 }
 
 func (m *mockProvider) Name() string { return "mock" }
@@ -32,6 +33,7 @@ func (m *mockProvider) DefaultModel() string { return "mock-model" }
 func (m *mockProvider) Translate(_ context.Context, in provider.Request) (provider.Response, error) {
 	m.mu.Lock()
 	m.calls++
+	m.efforts = append(m.efforts, in.Effort)
 	m.mu.Unlock()
 	out := make([]provider.TranslatedLine, len(in.Lines))
 	for i, l := range in.Lines {

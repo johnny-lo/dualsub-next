@@ -182,7 +182,8 @@ cd extension && npm run build
 |--------|----------------------|------------------------------------------------|
 | GET    | `/healthz`           | liveness                                       |
 | GET    | `/v1/providers`      | list configured providers                      |
-| POST   | `/v1/translate`      | streams chunked translation as SSE             |
+| GET    | `/v1/providers/{name}/models[?refresh=1]` | models the provider's account can use now (cached 5 min; `refresh=1` re-asks) |
+| POST   | `/v1/translate`      | streams chunked translation as SSE; optional `model`, `effort` (codex) |
 | GET    | `/v1/jobs?limit=N`   | recent jobs (most recent first)                |
 | DELETE | `/v1/jobs`           | clear job history only; keeps translation cache |
 | GET    | `/v1/config`         | current daemon config                          |
