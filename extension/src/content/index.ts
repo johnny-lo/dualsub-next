@@ -7,6 +7,7 @@ import { PREFERRED_SOURCE, TARGET_LANG } from '@/shared/langs'
 import { normalizeText } from '@/shared/transcript'
 import type { TranscriptEntry } from '@/shared/transcript'
 import { needsTranslation, prefetchCachedTranslations, type PrefetchResult } from './prefetch'
+import { SELECTION_KEY, parseSelection, requestTarget, type Selection } from '@/shared/selection'
 import type {
   CaptionCandidate,
   CaptionSnapshot,
@@ -31,6 +32,14 @@ let currentVideoKey: string | null = null
 let liveMode = false
 let liveProvider = ''
 let liveTargetLang = TARGET_LANG
+// The popup's remembered provider/model/effort. Auto-translate and live mode
+// read it at request time, so they follow the current choice; the provider
+// stored with them (liveProvider, autoTranslateConfig.provider) is only the
+// fallback for installs that predate the selection.
+let selection: Selection | null = null
+chrome.storage.onChanged.addListener((changes, area) => {
+  if (area === 'local' && changes[SELECTION_KEY]) selection = parseSelection(changes[SELECTION_KEY].newValue)
+})
 const inflightLive = new Set<string>()
 const TRANSLATE_PORT = 'dualsub-daemon-translate'
 
@@ -323,6 +332,8 @@ function startFullTranscriptTranslate(
     jobId: null,
     videoKey,
     provider: request.provider,
+    model: request.model,
+    effort: request.effort,
     status: 'running',
     totalChunks: 0,
     completedChunks: 0,
@@ -415,12 +426,13 @@ async function autoTranslateCurrentLecture(prefetched?: TranscriptEntry[]): Prom
 
   // Coverage is decided by the caller via needsTranslation(); the daemon
   // still skips every cached line, so only real misses reach the provider.
+  const target = requestTarget(selection, autoTranslateConfig.provider)
   fullTranslateStatus = {
     ok: true,
     active: true,
     jobId: null,
     videoKey,
-    provider: autoTranslateConfig.provider,
+    ...target,
     status: 'running',
     totalChunks: 0,
     completedChunks: 0,
@@ -453,7 +465,7 @@ async function autoTranslateCurrentLecture(prefetched?: TranscriptEntry[]): Prom
     site: extractor.site,
     video_key: videoKey,
     title: extractor.title(),
-    provider: autoTranslateConfig.provider,
+    ...target,
     source_lang: autoTranslateConfig.sourceLang,
     target_lang: autoTranslateConfig.targetLang,
     lines: entries.map((e) => ({ index: e.index, text: e.originalText })),
@@ -467,7 +479,8 @@ function handleCue(cue: ActiveCue | null) {
     return
   }
   overlay.render(cue.texts)
-  if (!liveMode || !liveProvider || !extractor) return
+  const target = requestTarget(selection, liveProvider)
+  if (!liveMode || !target.provider || !extractor) return
   for (const text of cue.texts) {
     if (overlay.hasTranslation(text)) continue
     if (inflightLive.has(text)) continue
@@ -479,7 +492,7 @@ function handleCue(cue: ActiveCue | null) {
         site: extractor.site,
         video_key: extractor.videoKey(),
         title: extractor.title(),
-        provider: liveProvider,
+        ...target,
         source_lang: 'auto',
         target_lang: liveTargetLang,
         lines: [{ index: 1, text: captured }],
@@ -829,7 +842,8 @@ async function loadCurrentLecture(): Promise<void> {
 // intent), then run the shared load sequence for the current lecture.
 async function bootstrap() {
   await new Promise<void>((resolve) => {
-    chrome.storage.local.get([AUTO_TRANSLATE_KEY, ATTEMPT_MARKERS_KEY], (data) => {
+    chrome.storage.local.get([AUTO_TRANSLATE_KEY, ATTEMPT_MARKERS_KEY, SELECTION_KEY], (data) => {
+      selection = parseSelection(data[SELECTION_KEY])
       const cfg = data[AUTO_TRANSLATE_KEY] as AutoTranslateConfig | undefined
       if (cfg && typeof cfg.provider === 'string') autoTranslateConfig = cfg
       const markers = data[ATTEMPT_MARKERS_KEY] as Record<string, AttemptMarker> | undefined
