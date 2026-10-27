@@ -64,6 +64,7 @@ type Input struct {
 	Site       string
 	Provider   string
 	Model      string
+	Effort     string // empty → provider/CLI default
 	SourceLang string
 	TargetLang string
 	Lines      []provider.Line
@@ -265,6 +266,7 @@ func (o *Orchestrator) runChunk(
 		}
 		req := provider.Request{
 			Lines: chunk, SourceLang: in.SourceLang, TargetLang: in.TargetLang, Model: model,
+			Effort: in.Effort,
 		}
 		res, err := prov.Translate(ctx, req)
 		if err == nil {

@@ -49,7 +49,7 @@ import, and health routes, and requires a bearer token on every request.
    └─ worker pool (default 3)
           ├─ shared-cache resolve (when configured)
           └─ unavailable → local provider.Translate() + sync_outbox
-                                     │ HTTP to vendor (OpenAI / Gemini / Ollama)
+                                     │ HTTP to vendor (OpenAI / Ollama) or CLI (codex / agy)
                                      ▼
                                 ParseResponse → cache.StoreTranslations
                                      │
@@ -78,7 +78,7 @@ popup teardown and MV3 content-script churn.
 | `internal/config/config.go` | TOML load + env-var overrides + defaults + `~` expansion. `Save()` does atomic-rename TOML write. **Both `toml:` and `json:` tags required** on every field — TOML is on disk, JSON is the API. |
 | `internal/cache/cache.go` | SQLite (`modernc.org/sqlite`, pure Go). Five tables: `translations`, `transcripts`, `jobs`, `sync_outbox`, `cache_meta`. Local fallback results and outbox keys are written atomically. `QueueHistoricalTranslationsForSync()` performs one idempotent backfill for translations created before shared sync was enabled. `Key()` is the canonical cache-key derivation. `:memory:` accepted for tests. `SetMaxOpenConns(1)` is intentional (see §7). |
 | `internal/logger/logger.go` | JSONL append-only with mutex. `New("")` writes only to stderr. No rotation; user wipes manually. |
-| `internal/provider/` | LLM adapters. `provider.go` = interface + types + `Error` + error codes. `http.go` = shared client + status→code mapping (`mapStatus`). `prompt.go` = `BuildPrompt` + `ParseResponse`. `openai.go`, `gemini.go`, `ollama.go`, `claude.go` (stub). |
+| `internal/provider/` | LLM adapters. `provider.go` = interface + types + `Error` + error codes. `http.go` = shared client + status→code mapping (`mapStatus`). `prompt.go` = `BuildPrompt` + `ParseResponse`. `openai.go`, `ollama.go` (HTTP), `codex.go`, `agy.go` (local CLIs on the user's subscriptions; each call of agy runs in a fresh empty temp dir), `claude.go` (stub). Providers that can list their models implement the optional `ModelLister`. |
 | `internal/translate/` | Orchestrator. `event.go` = typed events. `orchestrator.go` = chunking + worker pool + retry-with-backoff + cache writes. Translation runs the worker pool; `Translate(ctx, in, events chan<- Event)` closes `events` itself. |
 | `internal/server/` | HTTP routes + SSE writer + CORS. `server.go` constructs and exposes `ListenAndServe`. `handlers.go` has all route handlers. `sse.go` is the SSE writer. `lookup.go` is the cache-only `POST /v1/lookup` (local SQLite, then `Options.RemoteLookup` for the misses; remote hits are stored locally without touching `sync_outbox`). |
 | `internal/sharedcache/` | Tailscale-oriented local-first sharing. Authenticated central resolve/import server, circuit-breaking client/provider wrapper, exact-batch in-flight coalescing, and the background outbox uploader. It never exposes daemon config or API keys. `events.go` defines the optional `EventLogger`; both sides log `shared_*` events (resolve/import/auth failures on the central node, fetch/fallback/upload on clients) so sync activity is observable. `/v1/lookup` + `Client.Lookup()` are the cache-only path; a 404 from an older central is `ErrLookupUnsupported` and does not trip the circuit breaker. |
@@ -101,8 +101,9 @@ popup teardown and MV3 content-script churn.
 | `src/content/extractors/parseVtt.ts` | VTT parser used by Udemy Tier 1. |
 | `src/content/overlay/SubtitleOverlay.ts` | Shadow-DOM bilingual overlay. Drag-to-reposition with the overlay anchored by its center point, so line-length changes remain centered after dragging. **Position is stored as normalized host coordinates** (`{x,y}` in 0–1) in `chrome.storage.local` under `dualsubOverlayPosition`, so dragging stays stable across normal/fullscreen/resized viewports; the container is `position:absolute` inside a `position:fixed; inset:0` host. `setTranslations()` replaces, `patchTranslations()` merges. `render(texts: string[] \| null)` builds one `(original, translated)` pair per active cue; lookup uses `normalizeText()` + a fuzzy fallback (longest-substring containment, then word-overlap Jaccard ≥ 0.6) to bridge VTT-source vs DOM-rendered cue divergence. Hides native captions via injected `<style id="dualsub-hide-native-captions">` covering Udemy (`captions-display--*`, `captions-cue--*`, `well--text--*`, `well--container--*`, `[data-purpose="captions-cue-text"]`, `[data-purpose="captions-display"]`) + Netflix (`.player-timedtext`) + `video::cue`, layered `opacity:0` + `visibility:hidden` + `color:transparent` + `text-shadow:none`. Supports `OverlayStyle` (font size/color) stored in `chrome.storage.local` under `dualsubOverlayStyle`. **Click-to-reveal**: the translation line is blank unless `revealed` is on, so the reading reflex is original-first; a mousedown/mouseup pair within `CLICK_MOVE_TOLERANCE_PX` (4px) toggles it and anything further is a drag, and the state persists in `chrome.storage.local` under `dualsubOverlayRevealed`. Toggling re-renders `lastTexts` so the cue on screen updates immediately instead of on the next cue. `debugSampleKeys(n)` exposed for the `__dualsubDebug.diag()` helper. |
 | `src/popup/App.tsx` | Main UI. Header shows daemon status only; provider selection lives in the Translate panel. Popup queries `GET_TRANSLATE_STATUS` on mount and polling ticks to restore progress after popup teardown. Recent Jobs can clear job history via `DELETE /v1/jobs`; translation and transcript caches are preserved. |
-| `src/options/App.tsx` | Antd Form covering server / translate / cache / 3 providers. Saves via `client.putConfig()`; UI tells user to restart daemon. Also has "Subtitle Overlay Style" section for font size/color settings (saved to `chrome.storage.local`). |
-| `src/shared/DaemonClient.ts` | One class wrapping daemon HTTP + SSE. `translate(req, handlers)` returns an abort fn; `clearJobs()` calls `DELETE /v1/jobs`. `lookup(req)` is the one-shot cache-only POST, called directly from the content script. |
+| `src/options/App.tsx` | Antd Form covering server / translate / cache / OpenAI + Ollama (codex and agy are TOML-only). Saves via `client.putConfig()`; UI tells user to restart daemon. Also has "Subtitle Overlay Style" section for font size/color settings (saved to `chrome.storage.local`). |
+| `src/shared/DaemonClient.ts` | One class wrapping daemon HTTP + SSE. `translate(req, handlers)` returns an abort fn; `clearJobs()` calls `DELETE /v1/jobs`. `lookup(req)` is the one-shot cache-only POST, called directly from the content script. `listModels(provider, { refresh })` reads a provider's live model list. |
+| `src/shared/selection.ts` | The remembered provider/model/effort choice (`dualsubSelection` in `chrome.storage.local`, per-provider). The popup writes it; the content script reads it (and watches `chrome.storage.onChanged`) so auto-translate and live mode follow the current choice. `reconcileChoice` is only ever applied to a successfully fetched model list. |
 | `src/shared/langs.ts` | `PREFERRED_SOURCE` / `TARGET_LANG`. Popup translate and content prefetch must derive the same cache keys — change both or neither. |
 | `src/shared/messaging.ts` | `ContentMessage` discriminated union + `sendToActiveTab()`. **All popup ↔ content message types live here**, nowhere else. Includes `START_TRANSLATE` / `CANCEL_TRANSLATE` for background full-transcript translation, `GET_TRANSLATE_STATUS` for popup rehydration, and `CAPTION_SNAPSHOT` (debug DOM probe). Also defines the content↔worker relay port protocol (`DaemonStreamCommand` / `DaemonStreamEvent`, see §4.7) and the `CaptionSnapshot` / `CaptionCandidate` shapes. |
 | `src/shared/transcript.ts` | `TranscriptEntry`, `formatTranscriptForExport`, `normalizeText`, `parseTranslatedTranscript`. `normalizeText` does NFKC + lowercase + smart-quote/dash unification + strips `\p{P}\p{S}` (preserves CJK via Unicode property escapes — do not switch to `\w`). `parseTranslatedTranscript` is used by the popup paste-back flow to parse `[index] text` format. |
@@ -167,7 +168,7 @@ sha256(shared-v2 | sourceLang | targetLang | normalize(originalText))
 
 `normalize` lowercases and collapses whitespace. Always derive cache keys
 via `cache.Key()`; never recompute by hand. Provider and model are metadata,
-not cache identity, so Codex, Gemini, Ollama, and future providers reuse the
+not cache identity, so Codex, agy, Ollama, and future providers reuse the
 same result. `cache.LegacyKey()` exists only for compatibility with older
 shared-cache clients.
 
@@ -246,8 +247,9 @@ Invariants that bite if you forget:
 ### Add a new LLM provider
 
 1. Implement `provider.Provider` in `daemon/internal/provider/<name>.go`.
-   Use `gemini.go` as the template — it covers the trickiest cases (URL
-   key, native request shape, multi-part response).
+   Use `openai.go` as the template for an HTTP API, or `codex.go` / `agy.go`
+   for a local CLI (fake-CLI tests in `fake_cli_test.go`). Implement
+   `ModelLister` too, so the popup can list the provider's models live.
 2. Add a `<Name>Provider` config struct in `daemon/internal/config/config.go`
    and include it in `ProvidersConfig`.
 3. Register in `daemon/cmd/dualsub/main.go:buildProviders`.
@@ -302,9 +304,6 @@ to one shared key.
 - **Shared listener binding**: bind `sync.listen` to the central node's
   Tailscale IP, never `0.0.0.0`. Clients use MagicDNS in `sync.central_url`.
   Every shared request requires the common sync token.
-- **Gemini API key in URL**: traditional Gemini auth puts the key in the
-  query string, not a header (see `gemini.go`). Be careful logging request
-  URLs — they leak the key.
 - **PUT /v1/config does NOT hot-reload** the running daemon. It writes the
   file and the response says "restart daemon to apply". Intentional.
 - **`onChunkError` events with `final=false`** are intermediate retry
@@ -419,7 +418,6 @@ These are decisions, not omissions. Each was discussed with the user.
 cd daemon && go vet ./... && go test ./...
 
 # daemon: live integration (real keys; auto-skipped without env)
-GEMINI_API_KEY=...   go test -tags=integration ./internal/provider/ -run TestGeminiLive -v
 OPENAI_API_KEY=...   go test -tags=integration ./internal/provider/ -run TestOpenAILive -v
 OLLAMA_TEST=1        go test -tags=integration ./internal/provider/ -run TestOllamaLive -v
 

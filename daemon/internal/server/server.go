@@ -40,6 +40,7 @@ type Server struct {
 	cfgPath   string
 	log       *logger.Logger
 	remote    RemoteLookup
+	models    *modelCache
 }
 
 func New(opts Options) *Server {
@@ -51,11 +52,13 @@ func New(opts Options) *Server {
 		cfgPath:   opts.ConfigPath,
 		log:       opts.Logger,
 		remote:    opts.RemoteLookup,
+		models:    newModelCache(),
 	}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", handleHealthz)
 	mux.HandleFunc("/v1/providers", s.handleProviders)
+	mux.HandleFunc("GET /v1/providers/{name}/models", s.handleProviderModels)
 	mux.HandleFunc("/v1/translate", s.handleTranslate)
 	mux.HandleFunc("/v1/jobs", s.handleJobs)
 	mux.HandleFunc("/v1/config", s.handleConfig)

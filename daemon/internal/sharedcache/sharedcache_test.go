@@ -17,9 +17,10 @@ import (
 )
 
 type mockProvider struct {
-	mu    sync.Mutex
-	calls int
-	delay time.Duration
+	mu      sync.Mutex
+	calls   int
+	delay   time.Duration
+	efforts []string
 }
 
 func (p *mockProvider) Name() string         { return "mock" }
@@ -27,6 +28,7 @@ func (p *mockProvider) DefaultModel() string { return "mock-model" }
 func (p *mockProvider) Translate(ctx context.Context, in provider.Request) (provider.Response, error) {
 	p.mu.Lock()
 	p.calls++
+	p.efforts = append(p.efforts, in.Effort)
 	p.mu.Unlock()
 	if p.delay > 0 {
 		select {
@@ -755,5 +757,54 @@ func TestClientLogsCentralFetchAndLocalFallback(t *testing.T) {
 	fallbacks := lg.byKind("shared_fallback_local")
 	if len(fallbacks) != 1 || fallbacks[0]["lines"] != 1 || fallbacks[0]["error"] == "" {
 		t.Fatalf("shared_fallback_local events = %v", fallbacks)
+	}
+}
+
+func TestResolveForwardsEffort(t *testing.T) {
+	central := &mockProvider{}
+	ts := newTestServer(t, newTestCache(t), central)
+	client := newTestClient(t, ts.URL, "test-token")
+	_, err := client.Resolve(context.Background(), "mock", "mock-model", provider.Request{
+		Lines:      []provider.Line{{Index: 1, Text: "effort please"}},
+		SourceLang: "en", TargetLang: "zh-TW", Model: "gpt-5.6-sol", Effort: "low",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	central.mu.Lock()
+	defer central.mu.Unlock()
+	if len(central.efforts) != 1 || central.efforts[0] != "low" {
+		t.Fatalf("central provider saw efforts %v, want [low]", central.efforts)
+	}
+}
+
+// listingProvider is a mockProvider that can also list models.
+type listingProvider struct {
+	mockProvider
+	models []provider.ModelInfo
+}
+
+func (p *listingProvider) ListModels(context.Context) ([]provider.ModelInfo, error) {
+	return p.models, nil
+}
+
+func TestFallbackProviderListModelsDelegatesLocally(t *testing.T) {
+	// An unreachable central proves the list never comes from it.
+	client := newTestClient(t, "http://127.0.0.1:1", "test-token")
+	local := &listingProvider{models: []provider.ModelInfo{{ID: "gpt-5.6-sol", Label: "GPT-5.6-Sol"}}}
+	got, err := NewFallbackProvider(local, client).ListModels(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].ID != "gpt-5.6-sol" {
+		t.Fatalf("models = %+v", got)
+	}
+}
+
+func TestFallbackProviderListModelsUnsupported(t *testing.T) {
+	client := newTestClient(t, "http://127.0.0.1:1", "test-token")
+	_, err := NewFallbackProvider(&mockProvider{}, client).ListModels(context.Background())
+	if !errors.Is(err, provider.ErrListUnsupported) {
+		t.Fatalf("err = %v, want ErrListUnsupported", err)
 	}
 }

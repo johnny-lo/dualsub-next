@@ -71,6 +71,7 @@ type translateRequest struct {
 	Title      string          `json:"title"`
 	Provider   string          `json:"provider"`
 	Model      string          `json:"model,omitempty"`
+	Effort     string          `json:"effort,omitempty"`
 	SourceLang string          `json:"source_lang"`
 	TargetLang string          `json:"target_lang"`
 	Lines      []provider.Line `json:"lines"`
@@ -116,6 +117,7 @@ func (s *Server) handleTranslate(w http.ResponseWriter, r *http.Request) {
 			Site:       req.Site,
 			Provider:   req.Provider,
 			Model:      req.Model,
+			Effort:     req.Effort,
 			SourceLang: req.SourceLang,
 			TargetLang: req.TargetLang,
 			Lines:      req.Lines,

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -32,9 +33,7 @@ func TestSaveLoadRoundTrip(t *testing.T) {
 		CentralURL: "http://ubuntu-dev:7879", Token: "sync-secret", TokenFile: "/tmp/sync.token",
 		ConnectTimeoutMS: 500, RequestTimeoutSeconds: 120, IntervalSeconds: 20,
 	}
-	in.Providers.Gemini = &GeminiProvider{
-		APIKey: "abc", BaseURL: "https://example.com", DefaultModel: "gemini-2.5-flash",
-	}
+	in.Providers.Agy = &AgyProvider{Bin: "agy", Model: "gemini-3.8-flash-low"}
 	in.Providers.Ollama = &OllamaProvider{BaseURL: "http://localhost:11434"}
 
 	if err := in.Save(path); err != nil {
@@ -51,8 +50,8 @@ func TestSaveLoadRoundTrip(t *testing.T) {
 	if out.Translate.ChunkSize != 25 || out.Translate.Concurrency != 4 || out.Translate.MaxAttempts != 5 {
 		t.Errorf("translate fields lost: %+v", out.Translate)
 	}
-	if out.Providers.Gemini == nil || out.Providers.Gemini.APIKey != "abc" {
-		t.Errorf("gemini config lost: %+v", out.Providers.Gemini)
+	if out.Providers.Agy == nil || *out.Providers.Agy != (AgyProvider{Bin: "agy", Model: "gemini-3.8-flash-low"}) {
+		t.Errorf("agy config lost: %+v", out.Providers.Agy)
 	}
 	if out.Providers.Ollama == nil || out.Providers.Ollama.BaseURL != "http://localhost:11434" {
 		t.Errorf("ollama config lost: %+v", out.Providers.Ollama)
@@ -69,16 +68,29 @@ func TestEnabledProviders(t *testing.T) {
 	}
 
 	c.Providers.OpenAI = &OpenAIProvider{} // empty key
-	c.Providers.Gemini = &GeminiProvider{APIKey: "k"}
 	c.Providers.Ollama = &OllamaProvider{}
+	c.Providers.Codex = &CodexProvider{}
+	c.Providers.Agy = &AgyProvider{}
 
-	got := c.EnabledProviders()
-	if len(got) != 2 {
-		t.Fatalf("expected 2 enabled, got %v", got)
+	// Registration order; openai is skipped because it has no key.
+	want := []string{"ollama", "codex", "agy"}
+	if got := c.EnabledProviders(); !reflect.DeepEqual(got, want) {
+		t.Errorf("got %v, want %v", got, want)
 	}
-	// Order is registration order: gemini then ollama (openai skipped because no key)
-	if got[0] != "gemini" || got[1] != "ollama" {
-		t.Errorf("unexpected order: %v", got)
+}
+
+func TestLoadIgnoresLegacyGeminiSection(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.toml")
+	legacy := "[providers.gemini]\napi_key = \"x\"\ndefault_model = \"gemini-flash-latest\"\n\n[providers.agy]\n"
+	if err := os.WriteFile(path, []byte(legacy), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	c, err := Load(path)
+	if err != nil {
+		t.Fatalf("a config that still has [providers.gemini] must load: %v", err)
+	}
+	if got := c.EnabledProviders(); !reflect.DeepEqual(got, []string{"agy"}) {
+		t.Errorf("got %v, want [agy]", got)
 	}
 }
 
@@ -112,7 +124,6 @@ func TestCodexConfigRoundTripAndEnabled(t *testing.T) {
 
 func TestApplyEnvOverrides(t *testing.T) {
 	t.Setenv("OPENAI_API_KEY", "env-openai")
-	t.Setenv("GEMINI_API_KEY", "env-gemini")
 	t.Setenv("DUALSUB_SYNC_TOKEN", "env-sync")
 
 	c := &Config{}
@@ -120,9 +131,6 @@ func TestApplyEnvOverrides(t *testing.T) {
 
 	if c.Providers.OpenAI == nil || c.Providers.OpenAI.APIKey != "env-openai" {
 		t.Errorf("openai key not applied: %+v", c.Providers.OpenAI)
-	}
-	if c.Providers.Gemini == nil || c.Providers.Gemini.APIKey != "env-gemini" {
-		t.Errorf("gemini key not applied: %+v", c.Providers.Gemini)
 	}
 	if c.Sync.Token != "env-sync" {
 		t.Errorf("sync token not applied: %q", c.Sync.Token)

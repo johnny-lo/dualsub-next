@@ -105,7 +105,7 @@ func (c *Client) Resolve(ctx context.Context, providerName, defaultModel string,
 		model = defaultModel
 	}
 	req := resolveRequest{
-		Provider: providerName, Model: model, SourceLang: in.SourceLang,
+		Provider: providerName, Model: model, Effort: in.Effort, SourceLang: in.SourceLang,
 		TargetLang: in.TargetLang, Lines: in.Lines,
 	}
 	var payload resolveResponse
@@ -234,6 +234,16 @@ func NewFallbackProvider(local provider.Provider, remote *Client) *FallbackProvi
 
 func (p *FallbackProvider) Name() string         { return p.local.Name() }
 func (p *FallbackProvider) DefaultModel() string { return p.local.DefaultModel() }
+
+// ListModels lists the local provider's models: the popup offers what this
+// machine's CLI or API key can use, never the central node's.
+func (p *FallbackProvider) ListModels(ctx context.Context) ([]provider.ModelInfo, error) {
+	lister, ok := p.local.(provider.ModelLister)
+	if !ok {
+		return nil, provider.ErrListUnsupported
+	}
+	return lister.ListModels(ctx)
+}
 
 func (p *FallbackProvider) Translate(ctx context.Context, in provider.Request) (provider.Response, error) {
 	res, remoteErr := p.remote.Resolve(ctx, p.Name(), p.DefaultModel(), in)

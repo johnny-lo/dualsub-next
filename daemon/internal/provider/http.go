@@ -13,8 +13,8 @@ import (
 	"time"
 )
 
-// apiKeyParamRE matches credentials carried in URL query strings (Gemini puts
-// the API key in `?key=...`). We scrub them out of any error message that
+// apiKeyParamRE matches credentials carried in URL query strings (some APIs
+// take the key as `?key=...`). We scrub them out of any error message that
 // might surface to the extension or logs.
 var apiKeyParamRE = regexp.MustCompile(`(?i)([?&](?:api_?key|key|access_token)=)[^&\s'"]+`)
 
@@ -47,6 +47,19 @@ func (h *httpClient) postJSON(ctx context.Context, urlStr string, headers map[st
 		return nil, &Error{Code: CodeBadRequest, Provider: h.name, Message: err.Error()}
 	}
 	req.Header.Set("Content-Type", "application/json")
+	return h.do(req, headers)
+}
+
+func (h *httpClient) getJSON(ctx context.Context, urlStr string, headers map[string]string) ([]byte, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, urlStr, nil)
+	if err != nil {
+		return nil, &Error{Code: CodeBadRequest, Provider: h.name, Message: err.Error()}
+	}
+	return h.do(req, headers)
+}
+
+// do sends req and maps transport failures and non-2xx statuses to *Error.
+func (h *httpClient) do(req *http.Request, headers map[string]string) ([]byte, error) {
 	for k, v := range headers {
 		req.Header.Set(k, v)
 	}

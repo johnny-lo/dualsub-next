@@ -1,9 +1,11 @@
 # DualSub Next
 
 Bilingual subtitle assistant for Netflix and Udemy. A local Go daemon handles
-LLM translation against multiple providers (OpenAI, Google Gemini, Ollama; Claude
-reserved); a Chrome extension extracts transcripts from the player and renders
-the bilingual overlay.
+LLM translation against multiple providers (the `codex` and Google Antigravity
+`agy` CLIs on your own subscriptions, OpenAI, Ollama; Claude reserved); a Chrome
+extension extracts transcripts from the player and renders the bilingual overlay.
+The popup lists each provider's models live, so you pick the model (and, for
+codex, the reasoning effort) per translation.
 
 ## Layout
 
@@ -25,9 +27,8 @@ Edit `~/.config/dualsub/config.toml` and uncomment at least one provider, for
 example:
 
 ```toml
-[providers.gemini]
-api_key = "AIza..."
-default_model = "gemini-2.5-flash"
+[providers.agy]     # Google Antigravity CLI; sign in by running `agy` once
+[providers.codex]   # OpenAI Codex CLI; sign in with `codex login`
 ```
 
 (You can also do this from the extension's Options page once the daemon is
@@ -168,7 +169,6 @@ In Chrome, open `chrome://extensions/`, enable Developer Mode, click
 cd daemon && go test ./...
 
 # daemon: live integration tests against your real API keys
-GEMINI_API_KEY=...   go test -tags=integration ./internal/provider/ -run TestGeminiLive -v
 OPENAI_API_KEY=...   go test -tags=integration ./internal/provider/ -run TestOpenAILive -v
 OLLAMA_TEST=1        go test -tags=integration ./internal/provider/ -run TestOllamaLive -v
 
@@ -182,7 +182,8 @@ cd extension && npm run build
 |--------|----------------------|------------------------------------------------|
 | GET    | `/healthz`           | liveness                                       |
 | GET    | `/v1/providers`      | list configured providers                      |
-| POST   | `/v1/translate`      | streams chunked translation as SSE             |
+| GET    | `/v1/providers/{name}/models[?refresh=1]` | models the provider's account can use now (cached 5 min; `refresh=1` re-asks) |
+| POST   | `/v1/translate`      | streams chunked translation as SSE; optional `model`, `effort` (codex) |
 | GET    | `/v1/jobs?limit=N`   | recent jobs (most recent first)                |
 | DELETE | `/v1/jobs`           | clear job history only; keeps translation cache |
 | GET    | `/v1/config`         | current daemon config                          |

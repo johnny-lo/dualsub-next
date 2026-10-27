@@ -359,6 +359,7 @@ func (r *resolver) resolve(ctx context.Context, req resolveRequest) (map[string]
 		sort.Slice(lines, func(i, j int) bool { return lines[i].Index < lines[j].Index })
 		res, err := prov.Translate(ctx, provider.Request{
 			Lines: lines, SourceLang: req.SourceLang, TargetLang: req.TargetLang, Model: model,
+			Effort: req.Effort,
 		})
 		if err != nil {
 			return nil, err

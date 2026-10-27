@@ -8,6 +8,7 @@ import (
 type resolveRequest struct {
 	Provider   string          `json:"provider"`
 	Model      string          `json:"model,omitempty"`
+	Effort     string          `json:"effort,omitempty"` // older centrals ignore it
 	SourceLang string          `json:"source_lang"`
 	TargetLang string          `json:"target_lang"`
 	Lines      []provider.Line `json:"lines"`

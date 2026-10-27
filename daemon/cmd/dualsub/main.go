@@ -62,7 +62,7 @@ Usage:
 
 Config:
   Default path:  ~/.config/dualsub/config.toml
-  Env overrides: OPENAI_API_KEY, GEMINI_API_KEY, OLLAMA_BASE_URL,
+  Env overrides: OPENAI_API_KEY, OLLAMA_BASE_URL,
                  DUALSUB_LISTEN, DUALSUB_SYNC_TOKEN`)
 }
 
@@ -102,8 +102,9 @@ func runServe(args []string) error {
 
 Set up at least one provider in %s, for example:
 
-    [providers.gemini]
-    api_key = "your-key-here"
+    [providers.agy]
+
+    [providers.codex]
 
 Or run: dualsub config init`, *cfgPath)
 	}
@@ -227,11 +228,6 @@ func buildProviders(cfg *config.Config) map[string]provider.Provider {
 			APIKey: c.APIKey, BaseURL: c.BaseURL, DefaultModel: c.DefaultModel,
 		})
 	}
-	if c := cfg.Providers.Gemini; c != nil && c.APIKey != "" {
-		out["gemini"] = provider.NewGemini(provider.GeminiOptions{
-			APIKey: c.APIKey, BaseURL: c.BaseURL, DefaultModel: c.DefaultModel,
-		})
-	}
 	if c := cfg.Providers.Ollama; c != nil {
 		out["ollama"] = provider.NewOllama(provider.OllamaOptions{
 			BaseURL: c.BaseURL, DefaultModel: c.DefaultModel,
@@ -241,6 +237,9 @@ func buildProviders(cfg *config.Config) map[string]provider.Provider {
 		out["codex"] = provider.NewCodex(provider.CodexOptions{
 			Bin: c.Bin, Profile: c.Profile, Model: c.Model, Sandbox: c.Sandbox,
 		})
+	}
+	if c := cfg.Providers.Agy; c != nil {
+		out["agy"] = provider.NewAgy(provider.AgyOptions{Bin: c.Bin, Model: c.Model})
 	}
 	return out
 }
@@ -274,10 +273,6 @@ max_attempts = 3
 
 # Pick at least one provider:
 
-# [providers.gemini]
-# api_key = "AIza..."
-# default_model = "gemini-2.5-flash"
-
 # [providers.openai]
 # api_key = "sk-..."
 # default_model = "gpt-4o-mini"
@@ -291,6 +286,10 @@ max_attempts = 3
 # profile = ""           # optional; codex exec -p
 # model = ""             # optional; codex exec -m
 # sandbox = "read-only"  # optional; codex exec -s
+
+# [providers.agy]
+# bin = "agy"            # optional; default resolves "agy" on PATH
+# model = ""             # optional default, e.g. "gemini-3.8-flash-low"
 `
 
 func runConfig(args []string) error {

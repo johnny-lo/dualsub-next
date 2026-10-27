@@ -95,3 +95,28 @@ func (p *ollamaProvider) Translate(ctx context.Context, in Request) (Response, e
 	}
 	return Response{Lines: lines, Raw: parsed.Message.Content}, nil
 }
+
+func parseOllamaModels(raw []byte) ([]ModelInfo, error) {
+	var parsed struct {
+		Models []struct {
+			Name string `json:"name"`
+		} `json:"models"`
+	}
+	if err := json.Unmarshal(raw, &parsed); err != nil {
+		return nil, &Error{Code: CodeParseFailed, Provider: "ollama", Message: fmt.Sprintf("decode tags: %v", err), Cause: err}
+	}
+	out := make([]ModelInfo, 0, len(parsed.Models))
+	for _, m := range parsed.Models {
+		out = append(out, ModelInfo{ID: m.Name, Label: m.Name})
+	}
+	return out, nil
+}
+
+// ListModels returns the models pulled into the local Ollama server.
+func (p *ollamaProvider) ListModels(ctx context.Context) ([]ModelInfo, error) {
+	raw, err := p.http.getJSON(ctx, p.opts.BaseURL+"/api/tags", nil)
+	if err != nil {
+		return nil, err
+	}
+	return parseOllamaModels(raw)
+}

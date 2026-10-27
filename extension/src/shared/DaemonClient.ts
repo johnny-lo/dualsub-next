@@ -5,6 +5,20 @@ export interface ProviderInfo {
   default_model?: string
 }
 
+/** One model a provider's account can use now (GET /v1/providers/{name}/models). */
+export interface ModelInfo {
+  id: string
+  label: string
+  /** Reasoning efforts the model accepts; only codex reports them. */
+  efforts?: string[]
+  default_effort?: string
+}
+
+export interface ModelList {
+  models: ModelInfo[]
+  fetched_at: string
+}
+
 export interface TranslatedLine {
   index: number
   text: string
@@ -16,6 +30,7 @@ export interface TranslateRequest {
   title?: string
   provider: string
   model?: string
+  effort?: string
   source_lang: string
   target_lang: string
   lines: Array<{ index: number; text: string }>
@@ -102,7 +117,6 @@ export interface DaemonConfig {
   cache: { path: string }
   providers: {
     openai?: { api_key: string; base_url: string; default_model: string }
-    gemini?: { api_key: string; base_url: string; default_model: string }
     ollama?: { base_url: string; default_model: string }
   }
 }
@@ -119,6 +133,20 @@ export class DaemonClient {
   async listProviders(): Promise<ProviderInfo[]> {
     const res = await fetch(`${this.baseURL}/v1/providers`)
     if (!res.ok) throw new Error(`HTTP ${res.status}`)
+    return res.json()
+  }
+
+  /**
+   * The models the provider's account can use now, as the daemon reports them.
+   * The daemon caches each list for five minutes; `refresh` re-asks the CLI/API.
+   */
+  async listModels(provider: string, opts: { refresh?: boolean } = {}): Promise<ModelList> {
+    const url = `${this.baseURL}/v1/providers/${encodeURIComponent(provider)}/models${opts.refresh ? '?refresh=1' : ''}`
+    const res = await fetch(url)
+    if (!res.ok) {
+      const body = (await res.json().catch(() => null)) as { error?: unknown } | null
+      throw new Error(typeof body?.error === 'string' ? body.error : `HTTP ${res.status}`)
+    }
     return res.json()
   }
 

@@ -11,7 +11,6 @@ import (
 
 // Run with:
 //   OPENAI_API_KEY=... go test -tags=integration ./internal/provider/ -run TestOpenAILive -v
-//   GEMINI_API_KEY=... go test -tags=integration ./internal/provider/ -run TestGeminiLive -v
 //   OLLAMA_TEST=1     go test -tags=integration ./internal/provider/ -run TestOllamaLive -v
 
 var sampleRequest = Request{
@@ -49,14 +48,6 @@ func TestOpenAILive(t *testing.T) {
 		t.Skip("set OPENAI_API_KEY to run")
 	}
 	runLive(t, NewOpenAI(OpenAIOptions{APIKey: key}))
-}
-
-func TestGeminiLive(t *testing.T) {
-	key := os.Getenv("GEMINI_API_KEY")
-	if key == "" {
-		t.Skip("set GEMINI_API_KEY to run")
-	}
-	runLive(t, NewGemini(GeminiOptions{APIKey: key}))
 }
 
 func TestOllamaLive(t *testing.T) {
